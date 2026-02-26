@@ -65,35 +65,53 @@ function fmtChange(c, id) {
 // Calculate 24h change by fetching last 2 days of CoinGecko market chart
 // This works for bitcoin, and we use gold-api.com for metals price + open as prev
 async function fetchMetal(sym) {
-  // Get spot price from gold-api.com (reliable, no key, CORS ok)
-  // Get 2-day history from gold-api.com history endpoint for prev close
-  const priceRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
+  // Fetch today's spot price AND yesterday's close in parallel
+  // Use Stooq for yesterday's close — it returns CSV with Date,Open,High,Low,Close
+  const metal = sym === "XAU" ? "xauusd" : "xagusd";
+  const stooqUrl = `https://stooq.com/q/l/?s=${metal}&f=sd2ohlc&e=csv`;
+  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(stooqUrl)}`;
+
+  const [priceRes, stooqRes] = await Promise.all([
+    fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" }),
+    fetch(proxyUrl, { cache: "no-store" }).catch(() => null),
+  ]);
+
   if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
   const d = await priceRes.json();
   if (!d.price) throw new Error(`No price for ${sym}`);
   const price = parseFloat(d.price);
 
-  // Try to get yesterday close from gold-api history
-  let prev = price;
-  try {
-    const hRes = await fetch(`https://api.gold-api.com/price/${sym}/history?period=week`, { cache: "no-store" });
-    if (hRes.ok) {
-      const h = await hRes.json();
-      const arr = Array.isArray(h) ? h : (h.history || h.data || []);
-      if (arr.length >= 2) {
-        arr.sort((a,b) => new Date(a.date||a.t||0) - new Date(b.date||b.t||0));
-        const yest = arr[arr.length - 2];
-        const p = parseFloat(yest.price || yest.close || yest.c || yest.Close);
+  // Try to get prev close from Stooq CSV
+  let prev = null;
+  if (stooqRes && stooqRes.ok) {
+    try {
+      const j = await stooqRes.json();
+      const lines = (j.contents || "").trim().split("\n");
+      // CSV header: Symbol,Date,Open,High,Low,Close
+      // We want yesterday's close — lines[2] if available, else use today's open
+      if (lines.length >= 3) {
+        const cols = lines[2].split(",");
+        const p = parseFloat(cols[5]); // Close column
+        if (!isNaN(p) && p > 0) prev = p;
+      } else if (lines.length >= 2) {
+        const cols = lines[1].split(",");
+        const p = parseFloat(cols[2]); // Open column as proxy
         if (!isNaN(p) && p > 0) prev = p;
       }
-    }
-  } catch(e) {}
+    } catch(e) {}
+  }
 
-  // If history didn't work, use open price from spot response as proxy
-  if (prev === price) {
+  // Fallback: use open_price field from gold-api response
+  if (!prev || isNaN(prev)) {
     const op = parseFloat(d.open_price || d.open || d.openPrice);
     if (!isNaN(op) && op > 0 && op !== price) prev = op;
   }
+  // Fallback: back-calculate from ch field
+  if (!prev || isNaN(prev)) {
+    const ch = parseFloat(d.ch);
+    if (!isNaN(ch) && ch !== 0) prev = price - ch;
+  }
+  if (!prev || isNaN(prev)) prev = price;
 
   const change    = price - prev;
   const changePct = prev !== price ? ((price - prev) / prev) * 100 : 0;
@@ -101,18 +119,37 @@ async function fetchMetal(sym) {
 }
 
 async function fetchBitcoin() {
-  // CoinGecko: current price + 24h change — reliable, no key needed
-  const r = await fetch(
-    "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true",
-    { cache: "no-store" }
-  );
-  if (!r.ok) throw new Error(`CoinGecko BTC: HTTP ${r.status}`);
+  // Try Coinbase public API first (no key, no rate limit, CORS ok)
+  try {
+    const [spotRes, statsRes] = await Promise.all([
+      fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot", { cache: "no-store" }),
+      fetch("https://api.coinbase.com/v2/prices/BTC-USD/historic?period=day", { cache: "no-store" }).catch(() => null),
+    ]);
+    if (spotRes.ok) {
+      const spotData = await spotRes.json();
+      const price = parseFloat(spotData.data.amount);
+      // Get 24h change from Binance public ticker (no key, CORS ok)
+      const binRes = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", { cache: "no-store" });
+      if (binRes.ok) {
+        const bin = await binRes.json();
+        const prev = parseFloat(bin.prevClosePrice);
+        const change = price - prev;
+        const changePct = (change / prev) * 100;
+        return { price, prev, change, changePct, source: "Coinbase + Binance" };
+      }
+      return { price, prev: price, change: 0, changePct: 0, source: "Coinbase" };
+    }
+  } catch(e) {}
+
+  // Fallback: Binance 24hr ticker alone
+  const r = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", { cache: "no-store" });
+  if (!r.ok) throw new Error(`Binance BTC: HTTP ${r.status}`);
   const d = await r.json();
-  if (!d.bitcoin?.usd) throw new Error("CoinGecko: no BTC price");
-  const price     = d.bitcoin.usd;
-  const changePct = d.bitcoin.usd_24h_change ?? 0;
-  const change    = price * (changePct / 100);
-  return { price, prev: price - change, change, changePct, source: "CoinGecko" };
+  const price = parseFloat(d.lastPrice);
+  const prev  = parseFloat(d.prevClosePrice);
+  const change = price - prev;
+  const changePct = (change / prev) * 100;
+  return { price, prev, change, changePct, source: "Binance" };
 }
 
 async function fetchSP500() {
@@ -512,13 +549,15 @@ const PERIODS = [
 ];
 
 async function fetchHistoricalBTC(days) {
-  const url = days <= 1
-    ? `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1&interval=hourly`
-    : `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}`;
+  // Binance klines endpoint — free, no key, CORS enabled
+  const interval = days <= 1 ? "1h" : days <= 7 ? "4h" : days <= 30 ? "1d" : days <= 182 ? "3d" : "1w";
+  const limit = days <= 1 ? 24 : days <= 7 ? 42 : days <= 30 ? 30 : days <= 182 ? 60 : 260;
+  const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
   const r = await fetch(url, { cache:"no-store" });
-  if (!r.ok) throw new Error("CoinGecko historical failed");
+  if (!r.ok) throw new Error(`Binance klines: HTTP ${r.status}`);
   const d = await r.json();
-  return d.prices.map(([ts, price]) => ({ ts, price }));
+  // Binance kline: [openTime, open, high, low, close, ...]
+  return d.map(k => ({ ts: k[0], price: parseFloat(k[4]) }));
 }
 
 async function fetchHistoricalSPY(days) {
@@ -1004,7 +1043,7 @@ function App() {
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
             {label:"Gold & Silver",src:"gold-api.com",color:"#D4AF37"},
-            {label:"Bitcoin",src:"CoinGecko",color:"#F7931A"},
+            {label:"Bitcoin",src:"Binance",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
             <div key={b.src} style={{padding:"3px 12px",background:"#0d0c09",border:`1px solid ${b.color}25`,borderRadius:20,color:"#7a6a48"}}>
