@@ -65,27 +65,28 @@ function fmtChange(c, id) {
 // Calculate 24h change by fetching last 2 days of CoinGecko market chart
 // This works for bitcoin, and we use gold-api.com for metals price + open as prev
 async function fetchMetal(sym) {
-  // Use Kraken for gold/silver — CORS enabled, returns last price + today open for change
-  // XAU = XAUUSD, XAG = XAGUSD on Kraken
-  const krakenPair = sym === "XAU" ? "XAUUSD" : "XAGUSD";
-  try {
-    const r = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${krakenPair}`, { cache: "no-store" });
-    if (r.ok) {
-      const d = await r.json();
-      if (!d.error || !d.error.length) {
-        const t = d.result[krakenPair] || d.result[Object.keys(d.result)[0]];
-        if (t) {
-          const price     = parseFloat(t.c[0]);  // last trade price
-          const open      = parseFloat(t.o);     // today's opening price
-          const change    = price - open;
-          const changePct = (change / open) * 100;
-          return { price, prev: open, change, changePct, source: "Kraken" };
+  // Use Finnhub forex quote — same key as S&P500, returns price + prevClose
+  // Finnhub forex symbols: OANDA:XAU_USD and OANDA:XAG_USD
+  const finnSym = sym === "XAU" ? "OANDA:XAU_USD" : "OANDA:XAG_USD";
+  if (FINNHUB_KEY) {
+    try {
+      const r = await fetch(
+        `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(finnSym)}&token=${FINNHUB_KEY}`,
+        { cache: "no-store" }
+      );
+      if (r.ok) {
+        const d = await r.json();
+        if (d.c && d.c > 0) {
+          const price     = d.c;
+          const prev      = d.pc;
+          const change    = d.d;
+          const changePct = d.dp;
+          return { price, prev, change, changePct, source: "Finnhub" };
         }
       }
-    }
-  } catch(e) {}
-
-  // Fallback: gold-api.com for price only (no reliable change data)
+    } catch(e) {}
+  }
+  // Fallback: gold-api.com for price only
   const priceRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
   if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
   const d = await priceRes.json();
@@ -1013,7 +1014,7 @@ function App() {
         {/* Source badges */}
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
-            {label:"Gold & Silver",src:"Kraken",color:"#D4AF37"},
+            {label:"Gold & Silver",src:"Finnhub",color:"#D4AF37"},
             {label:"Bitcoin",src:"Kraken",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
