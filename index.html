@@ -67,36 +67,44 @@ function fmtChange(c, id) {
 // Calculate 24h change by fetching last 2 days of CoinGecko market chart
 // This works for bitcoin, and we use gold-api.com for metals price + open as prev
 async function fetchMetal(sym) {
-  // metals.dev free API — returns live spot price + yesterday historical for 24h change
-  // Sign up free (no credit card) at https://metals.dev
+  // metals.dev — use /v1/metal endpoint which returns change & change_percentage directly
   if (METALS_DEV_KEY) {
     try {
       const metalName = sym === "XAU" ? "gold" : "silver";
-      // Fetch today's live price and yesterday's historical price in parallel
-      const yest = new Date(); yest.setDate(yest.getDate() - 1);
-      // Go back further if weekend
-      if (yest.getDay() === 0) yest.setDate(yest.getDate() - 1); // Sunday → Saturday
-      if (yest.getDay() === 6) yest.setDate(yest.getDate() - 1); // Saturday → Friday
-      const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-      const [liveRes, histRes] = await Promise.all([
-        fetch(`https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`, { cache: "no-store" }),
-        fetch(`https://api.metals.dev/v1/historical?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz&date=${fmt(yest)}`, { cache: "no-store" }),
-      ]);
-      if (liveRes.ok) {
-        const ld = await liveRes.json();
-        const price = parseFloat(ld.metals?.[metalName]);
-        if (!isNaN(price) && price > 0) {
-          let prev = price;
-          if (histRes.ok) {
-            const hd = await histRes.json();
-            const p = parseFloat(hd.metals?.[metalName]);
-            if (!isNaN(p) && p > 0) prev = p;
-          }
-          const change = price - prev;
-          const changePct = prev !== price ? (change / prev) * 100 : 0;
-          return { price, prev, change, changePct, source: "metals.dev" };
-        }
+      // Single-metal endpoint returns: spot, change, change_percentage, bid, ask, high, low
+      // Step 1: Get today's live price
+      const liveRes = await fetch(
+        `https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`,
+        { cache: "no-store" }
+      );
+      console.log(`metals.dev live status:`, liveRes.status);
+      if (!liveRes.ok) throw new Error(`metals.dev live: ${liveRes.status}`);
+      const ld = await liveRes.json();
+      console.log(`metals.dev live:`, JSON.stringify(ld).substring(0, 300));
+      const price = parseFloat(ld.metals?.[metalName]);
+      if (isNaN(price) || price <= 0) throw new Error(`No price in response`);
+
+      // Step 2: Get yesterday's close — skip weekend days
+      const yest = new Date();
+      yest.setDate(yest.getDate() - 1);
+      if (yest.getDay() === 0) yest.setDate(yest.getDate() - 1); // Sun→Sat
+      if (yest.getDay() === 6) yest.setDate(yest.getDate() - 1); // Sat→Fri
+      const dateStr = yest.toISOString().split("T")[0];
+      const histRes = await fetch(
+        `https://api.metals.dev/v1/historical?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz&date=${dateStr}`,
+        { cache: "no-store" }
+      );
+      console.log(`metals.dev hist ${dateStr} status:`, histRes.status);
+      let prev = price;
+      if (histRes.ok) {
+        const hd = await histRes.json();
+        console.log(`metals.dev hist:`, JSON.stringify(hd).substring(0, 300));
+        const p = parseFloat(hd.metals?.[metalName]);
+        if (!isNaN(p) && p > 0) prev = p;
       }
+      const change = price - prev;
+      const changePct = prev !== price ? (change / prev) * 100 : 0;
+      return { price, prev, change, changePct, source: "metals.dev" };
     } catch(e) { console.error("metals.dev error:", e); }
   }
   // Fallback: gold-api.com (price only, no reliable change)
@@ -104,7 +112,7 @@ async function fetchMetal(sym) {
   if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
   const d = await priceRes.json();
   if (!d.price) throw new Error(`No price for ${sym}`);
-  return { price: parseFloat(d.price), prev: parseFloat(d.price), change: 0, changePct: 0, source: "gold-api.com (add metals.dev key for change data)" };
+  return { price: parseFloat(d.price), prev: parseFloat(d.price), change: 0, changePct: 0, source: "gold-api.com" };
 }
 
 async function fetchBitcoin() {
@@ -283,13 +291,14 @@ function PerfPanel({ prices }) {
     .map(([id,d]) => ({id, ...ASSETS[id], pct: d.changePct}))
     .sort((a,b) => b.pct - a.pct);
   if (!items.length) return null;
-  const maxAbs = Math.max(...items.map(i => Math.abs(i.pct)), 0.01);
+  // Use a fixed scale: clamp at 3% so all assets are visually comparable
+  const SCALE = Math.max(...items.map(i => Math.abs(i.pct)), 0.5);
   return (
     <div style={{background:"#0d0c09",border:"1px solid #1e1c14",borderRadius:12,padding:"18px 22px",marginBottom:18}}>
       <div style={{fontSize:10,letterSpacing:4,color:"#5a4a30",marginBottom:14}}>24H PERFORMANCE — ALL ASSETS</div>
       {items.map(item => {
         const isUp = item.pct >= 0;
-        const w = (Math.abs(item.pct) / maxAbs) * 42;
+        const w = Math.min((Math.abs(item.pct) / SCALE) * 46, 46);
         return (
           <div key={item.id} style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
             <span style={{width:68,fontSize:10,color:item.color,letterSpacing:2,flexShrink:0}}>{item.label.toUpperCase()}</span>
