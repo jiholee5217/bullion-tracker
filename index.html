@@ -35,6 +35,8 @@ const { useState, useEffect, useCallback, useRef } = React;
 // To get a free Finnhub key for S&P 500: https://finnhub.io/register (takes 30 sec)
 // Paste it below, or leave empty to use the no-key mode (slower fallback)
 const FINNHUB_KEY = "d6fra59r01qqnmbpo5v0d6fra59r01qqnmbpo5vg";
+// Free metals API key — sign up at https://metals.dev (free, no credit card, 100 req/month)
+const METALS_DEV_KEY = "3LH8RFJG2QMLIIZVZQ9M268ZVZQ9M"; // ← paste your metals.dev API key here
 
 const ASSETS = {
   gold:    { label:"Gold",    sym:"XAU", color:"#D4AF37", glow:"rgba(212,175,55,0.15)",  icon:"⚜",  fmt:"$,.2f", unit:"/troy oz" },
@@ -65,30 +67,44 @@ function fmtChange(c, id) {
 // Calculate 24h change by fetching last 2 days of CoinGecko market chart
 // This works for bitcoin, and we use gold-api.com for metals price + open as prev
 async function fetchMetal(sym) {
-  // Finnhub futures symbols: GC=F (gold) and SI=F (silver) — available on free tier
-  const futureSym = sym === "XAU" ? "GC=F" : "SI=F";
-  if (FINNHUB_KEY) {
+  // metals.dev free API — returns live spot price + yesterday historical for 24h change
+  // Sign up free (no credit card) at https://metals.dev
+  if (METALS_DEV_KEY) {
     try {
-      const r = await fetch(
-        `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(futureSym)}&token=${FINNHUB_KEY}`,
-        { cache: "no-store" }
-      );
-      if (r.ok) {
-        const d = await r.json();
-        if (d.c && d.c > 0) {
-          // Silver futures are quoted per troy oz * 5000 on SI=F, need /5000 — actually SI=F is already per oz
-          // GC=F is gold per troy oz, SI=F is silver per troy oz (both CME continuous)
-          return { price: d.c, prev: d.pc, change: d.d ?? (d.c - d.pc), changePct: d.dp ?? ((d.c - d.pc) / d.pc * 100), source: "Finnhub" };
+      const metalName = sym === "XAU" ? "gold" : "silver";
+      // Fetch today's live price and yesterday's historical price in parallel
+      const yest = new Date(); yest.setDate(yest.getDate() - 1);
+      // Go back further if weekend
+      if (yest.getDay() === 0) yest.setDate(yest.getDate() - 1); // Sunday → Saturday
+      if (yest.getDay() === 6) yest.setDate(yest.getDate() - 1); // Saturday → Friday
+      const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      const [liveRes, histRes] = await Promise.all([
+        fetch(`https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`, { cache: "no-store" }),
+        fetch(`https://api.metals.dev/v1/historical?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz&date=${fmt(yest)}`, { cache: "no-store" }),
+      ]);
+      if (liveRes.ok) {
+        const ld = await liveRes.json();
+        const price = parseFloat(ld.metals?.[metalName]);
+        if (!isNaN(price) && price > 0) {
+          let prev = price;
+          if (histRes.ok) {
+            const hd = await histRes.json();
+            const p = parseFloat(hd.metals?.[metalName]);
+            if (!isNaN(p) && p > 0) prev = p;
+          }
+          const change = price - prev;
+          const changePct = prev !== price ? (change / prev) * 100 : 0;
+          return { price, prev, change, changePct, source: "metals.dev" };
         }
       }
-    } catch(e) {}
+    } catch(e) { console.error("metals.dev error:", e); }
   }
   // Fallback: gold-api.com (price only, no reliable change)
   const priceRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
   if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
   const d = await priceRes.json();
   if (!d.price) throw new Error(`No price for ${sym}`);
-  return { price: parseFloat(d.price), prev: parseFloat(d.price), change: 0, changePct: 0, source: "gold-api.com" };
+  return { price: parseFloat(d.price), prev: parseFloat(d.price), change: 0, changePct: 0, source: "gold-api.com (add metals.dev key for change data)" };
 }
 
 async function fetchBitcoin() {
@@ -1010,7 +1026,7 @@ function App() {
         {/* Source badges */}
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
-            {label:"Gold & Silver",src:"Finnhub",color:"#D4AF37"},
+            {label:"Gold & Silver",src: METALS_DEV_KEY ? "metals.dev" : "gold-api.com",color:"#D4AF37"},
             {label:"Bitcoin",src:"Kraken",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
