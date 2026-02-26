@@ -34,7 +34,7 @@ const { useState, useEffect, useCallback, useRef } = React;
 // ─── CONFIG ─────────────────────────────────────────────────────────────────
 // To get a free Finnhub key for S&P 500: https://finnhub.io/register (takes 30 sec)
 // Paste it below, or leave empty to use the no-key mode (slower fallback)
-const FINNHUB_KEY = "";
+const FINNHUB_KEY = "d6fra59r01qqnmbpo5v0d6fra59r01qqnmbpo5vg";
 
 const ASSETS = {
   gold:    { label:"Gold",    sym:"XAU", color:"#D4AF37", glow:"rgba(212,175,55,0.15)",  icon:"⚜",  fmt:"$,.2f", unit:"/troy oz" },
@@ -62,15 +62,51 @@ function fmtChange(c, id) {
 
 // ─── API FETCHERS ────────────────────────────────────────────────────────────
 async function fetchMetal(sym) {
-  // gold-api.com — free, no auth, CORS enabled
-  const r = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
-  if (!r.ok) throw new Error(`gold-api ${sym}: HTTP ${r.status}`);
-  const d = await r.json();
-  if (!d.price) throw new Error(`gold-api returned no price for ${sym}`);
+  // Fetch spot price; also attempt OHLC for reliable prev-close
+  const [priceRes, ohlcRes] = await Promise.all([
+    fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" }),
+    fetch(`https://api.gold-api.com/price/${sym}/ohlc`, { cache: "no-store" }).catch(() => null),
+  ]);
+  if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
+  const d = await priceRes.json();
+  if (!d.price) throw new Error(`No price returned for ${sym}`);
   const price = parseFloat(d.price);
-  const prev  = parseFloat(d.prev_close_price || d.previousClose || price);
-  const change = d.ch != null ? parseFloat(d.ch) : price - prev;
-  const changePct = d.chp != null ? parseFloat(d.chp) : ((price - prev) / prev * 100);
+
+  // Try OHLC array for yesterday's close (most reliable prev-close source)
+  let prev = null;
+  if (ohlcRes && ohlcRes.ok) {
+    try {
+      const ohlc = await ohlcRes.json();
+      if (Array.isArray(ohlc) && ohlc.length >= 2) {
+        const yesterday = ohlc[ohlc.length - 2];
+        prev = parseFloat(yesterday.close ?? yesterday.c ?? yesterday.Close);
+      } else if (Array.isArray(ohlc) && ohlc.length === 1) {
+        const candle = ohlc[0];
+        prev = parseFloat(candle.open ?? candle.o ?? candle.Open);
+      }
+    } catch(e) {}
+  }
+
+  // Fallback 1: use ch field if nonzero (back-calculate prev)
+  if (!prev || isNaN(prev)) {
+    const ch = parseFloat(d.ch);
+    if (!isNaN(ch) && ch !== 0) prev = price - ch;
+  }
+  // Fallback 2: prev_close_price field
+  if (!prev || isNaN(prev)) {
+    const pc = parseFloat(d.prev_close_price || d.previousClose);
+    if (!isNaN(pc) && pc > 0) prev = pc;
+  }
+  // Fallback 3: open price as rough proxy
+  if (!prev || isNaN(prev)) {
+    const op = parseFloat(d.open_price || d.open);
+    if (!isNaN(op) && op > 0) prev = op;
+  }
+  // Give up gracefully — show 0 change rather than wrong number
+  if (!prev || isNaN(prev)) prev = price;
+
+  const change    = price - prev;
+  const changePct = prev !== price ? ((price - prev) / prev) * 100 : 0;
   return { price, prev, change, changePct, source: "gold-api.com" };
 }
 
@@ -128,7 +164,7 @@ function Sparkline({ data, color, w = 200, h = 48 }) {
   const [hov, setHov] = useState(null);
   if (!data || data.length < 2) return (
     <div style={{height:h, display:"flex", alignItems:"center", justifyContent:"center"}}>
-      <span style={{fontSize:9,color:"#3a3020",letterSpacing:2}}>30-DAY TREND (ILLUSTRATIVE)</span>
+      <span style={{fontSize:9,color:"#7a6a48",letterSpacing:2}}>30-DAY TREND (ILLUSTRATIVE)</span>
     </div>
   );
   const min = Math.min(...data), max = Math.max(...data), range = max - min || 1;
@@ -194,11 +230,11 @@ function AssetCard({ id, data, history }) {
           <span style={{fontSize:16,lineHeight:1}}>{cfg.icon}</span>
           <div>
             <div style={{fontSize:11,fontWeight:500,color:cfg.color,letterSpacing:3}}>{cfg.label.toUpperCase()}</div>
-            <div style={{fontSize:9,color:"#3a3020",letterSpacing:2,marginTop:1}}>{cfg.sym}</div>
+            <div style={{fontSize:9,color:"#7a6a48",letterSpacing:2,marginTop:1}}>{cfg.sym}</div>
           </div>
         </div>
         {data?.source && (
-          <div style={{fontSize:9,color:"#2a2010",letterSpacing:1,textAlign:"right",maxWidth:90,lineHeight:1.4}}>
+          <div style={{fontSize:9,color:"#5a4a30",letterSpacing:1,textAlign:"right",maxWidth:90,lineHeight:1.4}}>
             {data.source}
           </div>
         )}
@@ -208,7 +244,7 @@ function AssetCard({ id, data, history }) {
       {!data && (
         <div style={{height:64,display:"flex",alignItems:"center",gap:10}}>
           <div style={{width:16,height:16,border:`2px solid ${cfg.color}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
-          <span style={{fontSize:10,color:"#3a3020",letterSpacing:2}}>FETCHING LIVE PRICE...</span>
+          <span style={{fontSize:10,color:"#7a6a48",letterSpacing:2}}>FETCHING LIVE PRICE...</span>
         </div>
       )}
 
@@ -216,7 +252,7 @@ function AssetCard({ id, data, history }) {
       {data?.error && (
         <div style={{padding:"10px 0"}}>
           <div style={{fontSize:12,color:"#e74c3c",marginBottom:6}}>⚠ Could not load</div>
-          <div style={{fontSize:10,color:"#4a3a20",lineHeight:1.6}}>{data.error}</div>
+          <div style={{fontSize:10,color:"#9a8060",lineHeight:1.6}}>{data.error}</div>
           {id === "sp500" && !FINNHUB_KEY && (
             <div style={{marginTop:8,padding:"8px 10px",background:"#1a1200",border:"1px solid #3a2800",borderRadius:6,fontSize:9,color:"#a08040",lineHeight:1.8}}>
               For S&P 500: add a free Finnhub API key at the top of this file.<br/>
@@ -231,7 +267,7 @@ function AssetCard({ id, data, history }) {
         <>
           <div style={{fontSize:34,fontWeight:500,color:cfg.color,letterSpacing:-0.5,lineHeight:1,marginBottom:8}}>
             {fmtPrice(data.price, id)}
-            <span style={{fontSize:10,color:"#3a3020",marginLeft:8,letterSpacing:1,fontWeight:400}}>{cfg.unit}</span>
+            <span style={{fontSize:10,color:"#7a6a48",marginLeft:8,letterSpacing:1,fontWeight:400}}>{cfg.unit}</span>
           </div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
             {[fmtChange(data.change, id), `${data.changePct >= 0 ? "+" : ""}${data.changePct?.toFixed(2)}%`].map((v,i) => (
@@ -243,7 +279,7 @@ function AssetCard({ id, data, history }) {
                 border:`1px solid ${isUp?"#173520":"#351717"}`,
               }}>{isUp&&i===0?"▲ ":!isUp&&i===0?"▼ ":""}{v}</span>
             ))}
-            <span style={{fontSize:9,color:"#2a2010",letterSpacing:2,display:"flex",alignItems:"center",marginLeft:"auto"}}>24H</span>
+            <span style={{fontSize:9,color:"#5a4a30",letterSpacing:2,display:"flex",alignItems:"center",marginLeft:"auto"}}>24H</span>
           </div>
           <Sparkline data={history} color={cfg.color}/>
         </>
@@ -297,7 +333,9 @@ function RatiosPanel({ prices }) {
   const b = prices.bitcoin?.price, sp = prices.sp500?.price;
   if (!g || !s) return null;
   const gsr = g / s;
-  const pct = Math.min(100, Math.max(0, ((gsr - 60) / 60) * 100));
+  // Range: 40 (historic low) to 120 (historic high). Position = how far along that range.
+  const GSR_MIN = 40, GSR_MAX = 120;
+  const pct = Math.min(100, Math.max(0, ((gsr - GSR_MIN) / (GSR_MAX - GSR_MIN)) * 100));
   const rc = gsr < 70 ? "#2ecc71" : gsr > 90 ? "#e74c3c" : "#D4AF37";
   const ratios = [
     { label:"Gold / Silver (GSR)", val:gsr.toFixed(2), note:`${Math.round(gsr)} oz silver = 1 oz gold`, hint: gsr<70?"Silver historically cheap":gsr>90?"Gold historically cheap":"Neutral zone", color:"#D4AF37" },
@@ -313,9 +351,9 @@ function RatiosPanel({ prices }) {
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))",gap:10,marginBottom:16}}>
         {ratios.map((r,i) => (
           <div key={i} style={{background:"#0d0c09",border:`1px solid ${r.color}22`,borderLeft:`3px solid ${r.color}`,borderRadius:8,padding:"14px 16px"}}>
-            <div style={{fontSize:9,letterSpacing:2,color:"#4a4030",marginBottom:5}}>{r.label.toUpperCase()}</div>
+            <div style={{fontSize:9,letterSpacing:2,color:"#8a7a58",marginBottom:5}}>{r.label.toUpperCase()}</div>
             <div style={{fontSize:22,fontWeight:500,color:r.color,letterSpacing:-0.5,marginBottom:4}}>{r.val}</div>
-            <div style={{fontSize:10,color:"#4a3a20",marginBottom:r.hint?4:0}}>{r.note}</div>
+            <div style={{fontSize:10,color:"#9a8060",marginBottom:r.hint?4:0}}>{r.note}</div>
             {r.hint && <div style={{fontSize:9,color:r.color+"99",letterSpacing:1}}>{r.hint}</div>}
           </div>
         ))}
@@ -331,15 +369,36 @@ function RatiosPanel({ prices }) {
             {gsr < 70 ? "SILVER UNDERVALUED" : gsr > 90 ? "GOLD UNDERVALUED" : "NEUTRAL ZONE"}
           </span>
         </div>
-        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:5}}>
-          <span style={{color:"#2ecc71"}}>← SILVER CHEAP · 60</span>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:8}}>
+          <span style={{color:"#2ecc71"}}>← SILVER CHEAP · 40</span>
           <span style={{color:"#D4AF37"}}>80 · NEUTRAL</span>
-          <span style={{color:"#e74c3c"}}>100 · GOLD CHEAP →</span>
+          <span style={{color:"#e74c3c"}}>120 · GOLD CHEAP →</span>
         </div>
-        <div style={{height:8,background:"#161410",borderRadius:4,overflow:"hidden"}}>
-          <div style={{height:"100%",width:`${pct}%`,background:"linear-gradient(90deg,#2ecc71,#D4AF37,#e74c3c)",borderRadius:4,transition:"width 1s ease"}}/>
+        {/* Gauge with full gradient + position needle */}
+        <div style={{position:"relative",height:20,marginBottom:6}}>
+          {/* Full gradient always shown */}
+          <div style={{position:"absolute",top:6,left:0,right:0,height:8,background:"linear-gradient(90deg,#2ecc71 0%,#D4AF37 50%,#e74c3c 100%)",borderRadius:4}}/>
+          {/* Dark overlay right of current position to show "unvisited" zone */}
+          <div style={{position:"absolute",top:6,left:`${pct}%`,right:0,height:8,background:"rgba(7,7,7,0.72)",borderRadius:"0 4px 4px 0",transition:"left 1s ease"}}/>
+          {/* Glowing needle */}
+          <div style={{
+            position:"absolute",top:2,left:`${pct}%`,
+            transform:"translateX(-50%)",
+            width:3,height:16,background:"#ffffff",borderRadius:2,
+            boxShadow:`0 0 8px ${rc}, 0 0 16px ${rc}88`,
+            transition:"left 1s ease",
+          }}/>
+          {/* Value bubble above needle */}
+          <div style={{
+            position:"absolute",top:-20,left:`clamp(20px, ${pct}%, calc(100% - 20px))`,
+            transform:"translateX(-50%)",
+            fontSize:11,fontWeight:700,color:rc,
+            background:"#111",padding:"1px 7px",borderRadius:4,
+            border:`1px solid ${rc}55`,whiteSpace:"nowrap",
+            transition:"left 1s ease",pointerEvents:"none",
+          }}>{gsr.toFixed(1)}</div>
         </div>
-        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#282010",marginTop:5}}>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#282010",marginTop:4}}>
           <span>Historic low ~47 (2011)</span><span>Historic high ~124 (COVID 2020)</span>
         </div>
       </div>
@@ -369,7 +428,7 @@ function GitHubGuide() {
       {/* Step 1 */}
       <div style={{background:"#0d0c09",border:"1px solid #D4AF3722",borderLeft:"3px solid #D4AF37",borderRadius:8,padding:"18px 22px"}}>
         <div style={{fontSize:10,letterSpacing:3,color:"#D4AF37",marginBottom:12}}>STEP 1 — CREATE A GITHUB ACCOUNT & REPO</div>
-        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.8,marginBottom:10}}>
+        <p style={{fontSize:12,color:"#b0a080",lineHeight:1.8,marginBottom:10}}>
           Go to <strong style={{color:"#D4AF37"}}>github.com</strong> → sign in → click the <strong style={{color:"#c0c0c0"}}>"+"</strong> button → <strong style={{color:"#c0c0c0"}}>New repository</strong><br/>
           Name it <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>bullion-tracker</code>, set to <strong style={{color:"#c0c0c0"}}>Public</strong>, click <strong style={{color:"#c0c0c0"}}>Create repository</strong>.
         </p>
@@ -378,7 +437,7 @@ function GitHubGuide() {
       {/* Step 2 */}
       <div style={{background:"#0d0c09",border:"1px solid #A8B8C822",borderLeft:"3px solid #A8B8C8",borderRadius:8,padding:"18px 22px"}}>
         <div style={{fontSize:10,letterSpacing:3,color:"#A8B8C8",marginBottom:12}}>STEP 2 — INSTALL GIT (IF NOT ALREADY)</div>
-        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.8,marginBottom:10}}>
+        <p style={{fontSize:12,color:"#b0a080",lineHeight:1.8,marginBottom:10}}>
           Download Git from <strong style={{color:"#A8B8C8"}}>git-scm.com</strong> and install it. Then open your terminal (Mac: Terminal, Windows: Command Prompt or Git Bash).
         </p>
         <p style={{fontSize:11,color:"#5a5040",marginBottom:10}}>Verify it's installed:</p>
@@ -388,7 +447,7 @@ function GitHubGuide() {
       {/* Step 3 */}
       <div style={{background:"#0d0c09",border:"1px solid #F7931A22",borderLeft:"3px solid #F7931A",borderRadius:8,padding:"18px 22px"}}>
         <div style={{fontSize:10,letterSpacing:3,color:"#F7931A",marginBottom:12}}>STEP 3 — RENAME THE FILE & PUSH TO GITHUB</div>
-        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.8,marginBottom:12}}>
+        <p style={{fontSize:12,color:"#b0a080",lineHeight:1.8,marginBottom:12}}>
           Rename the downloaded file to <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>index.html</code> (GitHub Pages looks for this name). Then run these commands in the folder where the file is:
         </p>
         <Cmd id="a">git init</Cmd>
@@ -416,7 +475,7 @@ function GitHubGuide() {
           ].map((s,i) => (
             <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
               <span style={{width:20,height:20,background:"#5B9BD520",border:"1px solid #5B9BD540",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#5B9BD5",flexShrink:0}}>{i+1}</span>
-              <span style={{fontSize:12,color:"#7a6a50",paddingTop:2}}>{s}</span>
+              <span style={{fontSize:12,color:"#b0a080",paddingTop:2}}>{s}</span>
             </div>
           ))}
         </div>
@@ -429,7 +488,7 @@ function GitHubGuide() {
       {/* S&P 500 note */}
       <div style={{background:"#0d0c09",border:"1px solid #5a4a3044",borderLeft:"3px solid #c0a060",borderRadius:8,padding:"18px 22px"}}>
         <div style={{fontSize:10,letterSpacing:3,color:"#c0a060",marginBottom:10}}>BONUS — ENABLE LIVE S&P 500 PRICES</div>
-        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.9}}>
+        <p style={{fontSize:12,color:"#b0a080",lineHeight:1.9}}>
           1. Go to <strong style={{color:"#D4AF37"}}>finnhub.io/register</strong> — create a free account (30 seconds, no credit card).<br/>
           2. Copy your API key from the dashboard.<br/>
           3. Open <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>index.html</code> in a text editor, find line:<br/>
@@ -441,6 +500,441 @@ function GitHubGuide() {
     </div>
   );
 }
+
+// ─── HISTORICAL CHART ────────────────────────────────────────────────────────
+
+const CHART_ASSETS = {
+  gold:      { label:"Gold",         color:"#D4AF37", icon:"⚜",  isRatio:false },
+  silver:    { label:"Silver",       color:"#A8B8C8", icon:"◈",  isRatio:false },
+  bitcoin:   { label:"Bitcoin",      color:"#F7931A", icon:"₿",  isRatio:false },
+  sp500:     { label:"S&P 500",      color:"#5B9BD5", icon:"📊", isRatio:false },
+  gsr:       { label:"Gold/Silver",  color:"#c8a84b", icon:"⚖",  isRatio:true,
+               desc:"Gold ÷ Silver — oz of silver per oz of gold",
+               fetchA:"gold", fetchB:"silver" },
+  btcgold:   { label:"BTC/Gold",     color:"#e8a060", icon:"₿÷⚜", isRatio:true,
+               desc:"Bitcoin price ÷ Gold price — oz of gold per BTC",
+               fetchA:"bitcoin", fetchB:"gold" },
+  btcsp500:  { label:"BTC/S&P500",   color:"#8B7FD4", icon:"₿÷📊", isRatio:true,
+               desc:"Bitcoin price ÷ SPY ETF price",
+               fetchA:"bitcoin", fetchB:"sp500" },
+};
+
+const PERIODS = [
+  { key:"1D",  label:"24H",  days:1   },
+  { key:"7D",  label:"7D",   days:7   },
+  { key:"30D", label:"30D",  days:30  },
+  { key:"6M",  label:"6M",   days:182 },
+  { key:"1Y",  label:"1Y",   days:365 },
+  { key:"5Y",  label:"5Y",   days:1825},
+];
+
+async function fetchHistoricalBTC(days) {
+  const url = days <= 1
+    ? `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1&interval=hourly`
+    : `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}`;
+  const r = await fetch(url, { cache:"no-store" });
+  if (!r.ok) throw new Error("CoinGecko historical failed");
+  const d = await r.json();
+  return d.prices.map(([ts, price]) => ({ ts, price }));
+}
+
+async function fetchHistoricalSPY(days) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const csv_url = `https://stooq.com/q/d/l/?s=spy.us&d1=${fmt(start).replace(/-/g,'')}&d2=${fmt(end).replace(/-/g,'')}&i=d`;
+  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(csv_url)}`;
+  const r = await fetch(proxy, { cache:"no-store" });
+  if (!r.ok) throw new Error("SPY historical failed");
+  const j = await r.json();
+  const lines = j.contents.trim().split("\n").slice(1); // skip header
+  return lines.map(l => {
+    const cols = l.split(",");
+    const [year,month,day] = cols[0].split("-").map(Number);
+    return { ts: new Date(year, month-1, day).getTime(), price: parseFloat(cols[4]) };
+  }).filter(p => !isNaN(p.price));
+}
+
+async function fetchHistoricalMetal(sym, days) {
+  // freegoldapi.com — free, no key, CORS enabled
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  // Use daily endpoint — returns array of {date, price}
+  const metal = sym === "XAU" ? "gold" : "silver";
+  const url = `https://api.freegoldapi.com/v1/history?metal=${metal}&currency=USD&start_date=${fmt(start)}&end_date=${fmt(end)}`;
+  const r = await fetch(url, { cache:"no-store" });
+  if (!r.ok) throw new Error(`freegoldapi ${sym} failed: ${r.status}`);
+  const d = await r.json();
+  // Response: [{date, price}] or {prices:[{date,price}]}
+  const arr = Array.isArray(d) ? d : (d.prices || d.data || []);
+  return arr.map(item => ({
+    ts: new Date(item.date).getTime(),
+    price: parseFloat(item.price || item.close || item.value)
+  })).filter(p => !isNaN(p.price)).sort((a,b) => a.ts - b.ts);
+}
+
+// Align two time series by timestamp (daily resolution match)
+function alignSeries(a, b) {
+  // Build map from date-string to price for series b
+  const bMap = {};
+  b.forEach(p => { bMap[new Date(p.ts).toDateString()] = p.price; });
+  return a
+    .map(p => {
+      const key = new Date(p.ts).toDateString();
+      const bPrice = bMap[key];
+      if (!bPrice || isNaN(bPrice) || bPrice === 0) return null;
+      return { ts: p.ts, price: p.price / bPrice };
+    })
+    .filter(Boolean);
+}
+
+async function fetchHistoricalRatio(asset, days) {
+  const cfg = CHART_ASSETS[asset];
+  const [numData, denData] = await Promise.all([
+    fetchHistoricalForAsset(cfg.numerator, days),
+    fetchHistoricalForAsset(cfg.denominator, days),
+  ]);
+  if (!numData.length || !denData.length) throw new Error("Could not load ratio data");
+  return alignSeries(numData, denData);
+}
+
+async function fetchHistoricalForAsset(id, days) {
+  if (id === "bitcoin") return fetchHistoricalBTC(days);
+  if (id === "sp500")   return fetchHistoricalSPY(days);
+  if (id === "gold")    return fetchHistoricalMetal("XAU", days);
+  if (id === "silver")  return fetchHistoricalMetal("XAG", days);
+  throw new Error("Unknown asset: " + id);
+}
+
+function PriceChart({ currentPrices }) {
+  const [asset, setAsset] = React.useState("gold");
+  const [period, setPeriod] = React.useState("30D");
+  const [chartData, setChartData] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const [hovered, setHovered] = React.useState(null);
+  const svgRef = React.useRef(null);
+  const cfg = CHART_ASSETS[asset];
+  const per = PERIODS.find(p => p.key === period);
+
+  React.useEffect(() => {
+    setLoading(true);
+    setError(null);
+    setChartData([]);
+
+    const load = async () => {
+      try {
+        let data = [];
+        const fetchSeries = async (id) => {
+          if (id === "bitcoin") return await fetchHistoricalBTC(per.days);
+          if (id === "sp500")   return await fetchHistoricalSPY(per.days);
+          if (id === "gold")    return await fetchHistoricalMetal("XAU", per.days);
+          if (id === "silver")  return await fetchHistoricalMetal("XAG", per.days);
+          return [];
+        };
+        if (cfg.isRatio) {
+          // Fetch both series in parallel, then align by date and divide
+          const [seriesA, seriesB] = await Promise.all([
+            fetchSeries(cfg.fetchA),
+            fetchSeries(cfg.fetchB),
+          ]);
+          if (!seriesA.length || !seriesB.length) throw new Error("Could not load one or both series for ratio");
+          // Align: for each point in A, find nearest B by timestamp
+          const bMap = new Map(seriesB.map(p => [p.ts, p.price]));
+          const bTimes = seriesB.map(p => p.ts).sort((a,b)=>a-b);
+          const nearest = (ts) => {
+            let lo=0, hi=bTimes.length-1;
+            while(lo<hi){ const mid=(lo+hi)>>1; if(bTimes[mid]<ts) lo=mid+1; else hi=mid; }
+            return seriesB[lo]?.price;
+          };
+          data = seriesA.map(a => {
+            const bPrice = bMap.get(a.ts) ?? nearest(a.ts);
+            if (!bPrice || bPrice === 0) return null;
+            return { ts: a.ts, price: a.price / bPrice };
+          }).filter(Boolean);
+        } else {
+          data = await fetchSeries(asset);
+        }
+        if (!data || data.length < 2) throw new Error("Not enough data points returned");
+        setChartData(data);
+      } catch(e) {
+        setError(e.message);
+      }
+      setLoading(false);
+    };
+    load();
+  }, [asset, period]);
+
+  const W = 900, H = 260, PL = 72, PR = 20, PT = 36, PB = 32;
+  const cW = W - PL - PR, cH = H - PT - PB;
+
+  let path = "", areaPath = "", priceLabels = [], timeLabels = [], changeInfo = null;
+
+  if (chartData.length >= 2) {
+    const prices = chartData.map(d => d.price);
+    const times  = chartData.map(d => d.ts);
+    const minP = Math.min(...prices), maxP = Math.max(...prices);
+    const minT = Math.min(...times),  maxT = Math.max(...times);
+    const rangeP = maxP - minP || 1, rangeT = maxT - minT || 1;
+
+    const px = ts  => PL + ((ts  - minT) / rangeT) * cW;
+    const py = val => PT + (1 - (val - minP) / rangeP) * cH;
+
+    const pts = chartData.map(d => ({ x: px(d.ts), y: py(d.price), ts: d.ts, price: d.price }));
+    path = pts.map((p,i) => `${i===0?"M":"L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    areaPath = path + ` L${pts[pts.length-1].x.toFixed(1)},${(PT+cH).toFixed(1)} L${pts[0].x.toFixed(1)},${(PT+cH).toFixed(1)} Z`;
+
+    // Y axis labels (5 ticks)
+    for (let i = 0; i <= 4; i++) {
+      const val = minP + (i/4) * rangeP;
+      const y = py(val);
+      const label = cfg.isRatio
+        ? (val >= 1000 ? val.toLocaleString(undefined,{maximumFractionDigits:0})
+           : val >= 10  ? val.toFixed(2)
+           : val.toFixed(4))
+        : (val >= 10000 ? `$${Math.round(val/1000)}k`
+           : val >= 1000  ? `$${val.toLocaleString(undefined,{maximumFractionDigits:0})}`
+           : val >= 10    ? `$${val.toFixed(1)}`
+           : `$${val.toFixed(2)}`);
+      priceLabels.push({ y, label });
+    }
+
+    // X axis labels (5 ticks)
+    for (let i = 0; i <= 4; i++) {
+      const ts = minT + (i/4) * rangeT;
+      const x  = px(ts);
+      const d  = new Date(ts);
+      const label = per.days <= 1   ? d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+                  : per.days <= 7   ? d.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'})
+                  : per.days <= 182 ? d.toLocaleDateString([],{month:'short',day:'numeric'})
+                  : d.toLocaleDateString([],{month:'short',year:'2-digit'});
+      timeLabels.push({ x, label });
+    }
+
+    const first = prices[0], last = prices[prices.length-1];
+    const chg = last - first, chgPct = (chg/first)*100;
+    changeInfo = { chg, chgPct, isUp: chg >= 0, first, last };
+
+    // Hovered crosshair
+    if (hovered) {
+      const nearestPt = pts.reduce((best, pt) => Math.abs(pt.x - hovered.svgX) < Math.abs(best.x - hovered.svgX) ? pt : best);
+      hovered.nearest = nearestPt;
+    }
+  }
+
+  const handleMouseMove = (e) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const svgX = (e.clientX - rect.left) * scaleX;
+    if (svgX >= PL && svgX <= PL + cW) setHovered({ svgX });
+    else setHovered(null);
+  };
+
+  return (
+    <div style={{background:"linear-gradient(145deg,#0f0e0b,#0a0908)",border:"1px solid #2a2410",borderRadius:14,padding:"20px 24px",marginTop:18}}>
+      {/* Header row */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12,marginBottom:16}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:14,color:cfg.color}}>{cfg.icon}</span>
+          <span style={{fontSize:11,letterSpacing:4,color:cfg.color,fontWeight:500}}>{cfg.label.toUpperCase()}</span>
+          {changeInfo && (
+            <span style={{
+              fontSize:12,fontWeight:500,padding:"2px 10px",borderRadius:4,marginLeft:8,
+              background:changeInfo.isUp?"#0b1e0e":"#1e0b0b",
+              color:changeInfo.isUp?"#2ecc71":"#e74c3c",
+              border:`1px solid ${changeInfo.isUp?"#173520":"#351717"}`,
+            }}>
+              {changeInfo.isUp?"+":""}{changeInfo.chgPct.toFixed(2)}%{!cfg.isRatio && ` · ${changeInfo.isUp?"+":"-"}$${Math.abs(changeInfo.chg).toLocaleString(undefined,{maximumFractionDigits:2})}`}
+            </span>
+          )}
+          {changeInfo && (
+            <span style={{fontSize:10,color:"#5a5040",letterSpacing:1,marginLeft:4}}>over {per.label}</span>
+          )}
+          {cfg.isRatio && cfg.desc && (
+            <span style={{fontSize:9,color:"#4a3a20",letterSpacing:1,marginLeft:8}}>— {cfg.desc}</span>
+          )}
+        </div>
+
+        {/* Period selector */}
+        <div style={{display:"flex",gap:3}}>
+          {PERIODS.map(p => (
+            <button key={p.key} onClick={()=>setPeriod(p.key)} style={{
+              padding:"4px 12px",fontSize:10,letterSpacing:2,borderRadius:4,cursor:"pointer",
+              background:period===p.key?cfg.color:"transparent",
+              color:period===p.key?"#080808":cfg.color+"99",
+              border:`1px solid ${period===p.key?cfg.color:cfg.color+"33"}`,
+              fontFamily:"'DM Mono',monospace",transition:"all 0.15s",
+            }}>{p.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Asset selector — two rows */}
+      <div style={{marginBottom:14}}>
+        <div style={{fontSize:8,letterSpacing:3,color:"#3a3020",marginBottom:6}}>PRICE</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+          {Object.entries(CHART_ASSETS).filter(([,c])=>!c.isRatio).map(([id, c]) => (
+            <button key={id} onClick={()=>setAsset(id)} style={{
+              display:"flex",alignItems:"center",gap:6,
+              padding:"5px 14px",fontSize:10,letterSpacing:2,borderRadius:6,cursor:"pointer",
+              background:asset===id?`${c.color}18`:"transparent",
+              color:asset===id?c.color:"#5a5040",
+              border:`1px solid ${asset===id?c.color+"66":"#2a2410"}`,
+              fontFamily:"'DM Mono',monospace",transition:"all 0.15s",
+            }}>
+              <span>{c.icon}</span> {c.label.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        <div style={{fontSize:8,letterSpacing:3,color:"#3a3020",marginBottom:6}}>RATIOS</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {Object.entries(CHART_ASSETS).filter(([,c])=>c.isRatio).map(([id, c]) => (
+            <button key={id} onClick={()=>setAsset(id)} style={{
+              display:"flex",alignItems:"center",gap:6,
+              padding:"5px 14px",fontSize:10,letterSpacing:2,borderRadius:6,cursor:"pointer",
+              background:asset===id?`${c.color}18`:"transparent",
+              color:asset===id?c.color:"#5a5040",
+              border:`1px solid ${asset===id?c.color+"66":"#2a2410"}`,
+              fontFamily:"'DM Mono',monospace",transition:"all 0.15s",
+            }}>
+              <span style={{fontSize:11}}>{c.icon}</span> {c.label.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Chart */}
+      <div style={{position:"relative",width:"100%"}}>
+        {loading && (
+          <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(10,9,8,0.7)",borderRadius:8,zIndex:10}}>
+            <div style={{textAlign:"center"}}>
+              <div style={{width:24,height:24,border:`2px solid ${cfg.color}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 10px"}}/>
+              <div style={{fontSize:10,color:cfg.color+"88",letterSpacing:3}}>LOADING CHART...</div>
+            </div>
+          </div>
+        )}
+        {error && !loading && (
+          <div style={{height:180,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:8}}>
+            <div style={{fontSize:12,color:"#e74c3c"}}>⚠ Could not load historical data</div>
+            <div style={{fontSize:10,color:"#5a4030",maxWidth:400,textAlign:"center",lineHeight:1.6}}>{error}</div>
+            <div style={{fontSize:9,color:"#3a3020",marginTop:4}}>Historical data requires a live server (not file://). Deploy to GitHub Pages to use this feature.</div>
+          </div>
+        )}
+        {!error && chartData.length >= 2 && (
+          <svg
+            ref={svgRef}
+            viewBox={`0 0 ${W} ${H}`}
+            style={{width:"100%",height:"auto",display:"block",overflow:"visible"}}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={()=>setHovered(null)}
+          >
+            <defs>
+              <linearGradient id={`chartGrad${asset}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={cfg.color} stopOpacity="0.25"/>
+                <stop offset="85%" stopColor={cfg.color} stopOpacity="0"/>
+              </linearGradient>
+              <clipPath id="chartClip">
+                <rect x={PL} y={PT} width={cW} height={cH}/>
+              </clipPath>
+            </defs>
+
+            {/* Grid lines */}
+            {priceLabels.map((pl, i) => (
+              <line key={i} x1={PL} y1={pl.y} x2={PL+cW} y2={pl.y}
+                stroke="#1e1c14" strokeWidth="1" strokeDasharray="4,4"/>
+            ))}
+
+            {/* Area fill */}
+            <path d={areaPath} fill={`url(#chartGrad${asset})`} clipPath="url(#chartClip)"/>
+
+            {/* Price line */}
+            <path d={path} fill="none" stroke={cfg.color} strokeWidth="2"
+              strokeLinejoin="round" strokeLinecap="round" clipPath="url(#chartClip)"/>
+
+            {/* Y axis labels */}
+            {priceLabels.map((pl, i) => (
+              <text key={i} x={PL-8} y={pl.y+4} textAnchor="end"
+                fill="#6a5a40" fontSize="11" fontFamily="'DM Mono',monospace">{pl.label}</text>
+            ))}
+
+            {/* X axis labels */}
+            {timeLabels.map((tl, i) => (
+              <text key={i} x={tl.x} y={PT+cH+20} textAnchor="middle"
+                fill="#6a5a40" fontSize="10" fontFamily="'DM Mono',monospace">{tl.label}</text>
+            ))}
+
+            {/* Current price dot at end of line */}
+            {chartData.length >= 2 && (() => {
+              const prices = chartData.map(d => d.price);
+              const times  = chartData.map(d => d.ts);
+              const minP = Math.min(...prices), maxP = Math.max(...prices), rangeP = maxP-minP||1;
+              const minT = Math.min(...times),  maxT = Math.max(...times),  rangeT = maxT-minT||1;
+              const lx = PL + cW;
+              const ly = PT + (1 - (prices[prices.length-1]-minP)/rangeP) * cH;
+              return (
+                <g>
+                  <circle cx={lx} cy={ly} r="5" fill={cfg.color} opacity="0.4"/>
+                  <circle cx={lx} cy={ly} r="3" fill={cfg.color}/>
+                </g>
+              );
+            })()}
+
+            {/* Hover crosshair */}
+            {hovered && hovered.nearest && (
+              <g>
+                <line x1={hovered.nearest.x} y1={PT} x2={hovered.nearest.x} y2={PT+cH}
+                  stroke={cfg.color} strokeWidth="1" strokeDasharray="4,3" opacity="0.5"/>
+                <circle cx={hovered.nearest.x} cy={hovered.nearest.y} r="4" fill={cfg.color}/>
+                {/* Tooltip */}
+                {(() => {
+                  const bx = Math.min(hovered.nearest.x - 60, W - 140);
+                  const by = Math.max(hovered.nearest.y - 50, PT);
+                  const price = hovered.nearest.price;
+                  const label = cfg.isRatio
+                    ? (price >= 1000 ? price.toLocaleString(undefined,{maximumFractionDigits:2})
+                       : price >= 10   ? price.toFixed(4)
+                       : price.toFixed(6))
+                    : (price >= 10000 ? `$${Math.round(price).toLocaleString()}`
+                       : price >= 100  ? `$${price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`
+                       : `$${price.toFixed(3)}`);
+                  const dateLabel = new Date(hovered.nearest.ts).toLocaleDateString([],{
+                    month:'short', day:'numeric',
+                    year: per.days > 182 ? 'numeric' : undefined,
+                    hour: per.days <= 1 ? '2-digit' : undefined,
+                    minute: per.days <= 1 ? '2-digit' : undefined,
+                  });
+                  return (
+                    <g>
+                      <rect x={bx} y={by} width={130} height={40} rx="6"
+                        fill="#0f0e0b" stroke={cfg.color} strokeWidth="0.8" opacity="0.95"/>
+                      <text x={bx+10} y={by+15} fill={cfg.color} fontSize="13" fontWeight="600"
+                        fontFamily="'DM Mono',monospace">{label}</text>
+                      <text x={bx+10} y={by+30} fill="#6a5a40" fontSize="10"
+                        fontFamily="'DM Mono',monospace">{dateLabel}</text>
+                    </g>
+                  );
+                })()}
+              </g>
+            )}
+          </svg>
+        )}
+        {!loading && !error && chartData.length === 0 && (
+          <div style={{height:200,display:"flex",alignItems:"center",justifyContent:"center"}}>
+            <div style={{fontSize:10,color:"#4a4030",letterSpacing:3}}>SELECT AN ASSET AND PERIOD</div>
+          </div>
+        )}
+      </div>
+      <div style={{fontSize:8,color:"#3a3028",letterSpacing:2,marginTop:8,textAlign:"right"}}>
+        SOURCES: FREEGOLDAPI.COM (METALS) · COINGECKO (BTC) · STOOQ (SPY) · HISTORICAL DATA FOR INFORMATIONAL USE ONLY
+      </div>
+    </div>
+  );
+}
+
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
 function App() {
@@ -499,12 +993,12 @@ function App() {
           <div style={{width:34,height:34,background:"linear-gradient(135deg,#D4AF37,#f5e17a)",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,boxShadow:"0 0 16px rgba(212,175,55,0.3)"}}>⚜</div>
           <div>
             <div style={{fontSize:13,letterSpacing:4,color:"#D4AF37",fontWeight:500}}>BULLION TRACKER</div>
-            <div style={{fontSize:9,letterSpacing:3,color:"#3a3020",marginTop:1}}>GOLD · SILVER · BTC · S&P500</div>
+            <div style={{fontSize:9,letterSpacing:3,color:"#7a6a48",marginTop:1}}>GOLD · SILVER · BTC · S&P500</div>
           </div>
         </div>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
-          {lastUpdate && <div style={{fontSize:9,color:"#2a2010",letterSpacing:1,textAlign:"right"}}><div>UPDATED</div><div style={{color:"#4a4030"}}>{lastUpdate.toLocaleTimeString()}</div></div>}
-          <button onClick={() => fetchAll(true)} disabled={refreshing} style={{padding:"5px 13px",fontSize:10,letterSpacing:2,background:"transparent",color:refreshing?"#2a2010":"#D4AF37",border:`1px solid ${refreshing?"#2a2010":"#D4AF37"}`,borderRadius:4,fontFamily:"'DM Mono',monospace",transition:"all 0.2s"}}>
+          {lastUpdate && <div style={{fontSize:9,color:"#5a4a30",letterSpacing:1,textAlign:"right"}}><div>UPDATED</div><div style={{color:"#8a7a58"}}>{lastUpdate.toLocaleTimeString()}</div></div>}
+          <button onClick={() => fetchAll(true)} disabled={refreshing} style={{padding:"5px 13px",fontSize:10,letterSpacing:2,background:"transparent",color:refreshing?"#5a4a30":"#D4AF37",border:`1px solid ${refreshing?"#5a4a30":"#D4AF37"}`,borderRadius:4,fontFamily:"'DM Mono',monospace",transition:"all 0.2s"}}>
             {refreshing ? "..." : "↻ REFRESH"}
           </button>
           <div style={{display:"flex",alignItems:"center",gap:7,padding:"5px 11px",background:"#0d1a0d",border:"1px solid #1a3a1a",borderRadius:4}}>
@@ -522,7 +1016,7 @@ function App() {
             {label:"Bitcoin",src:"CoinGecko",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
-            <div key={b.src} style={{padding:"3px 12px",background:"#0d0c09",border:`1px solid ${b.color}25`,borderRadius:20,color:"#3a3020"}}>
+            <div key={b.src} style={{padding:"3px 12px",background:"#0d0c09",border:`1px solid ${b.color}25`,borderRadius:20,color:"#7a6a48"}}>
               <span style={{color:b.color}}>{b.label}</span> via {b.src}
             </div>
           ))}
@@ -530,9 +1024,9 @@ function App() {
 
         {/* Tabs */}
         <div style={{display:"flex",gap:2,marginBottom:22,borderBottom:"1px solid #1a1810"}}>
-          {["overview","ratios","deploy"].map(t => (
-            <button key={t} onClick={() => setTab(t)} style={{padding:"9px 22px",fontSize:10,letterSpacing:3,color:tab===t?"#D4AF37":"#3a3020",background:"none",border:"none",borderBottom:tab===t?"2px solid #D4AF37":"2px solid transparent",outline:"none",fontFamily:"'DM Mono',monospace",transition:"all 0.2s",marginBottom:-1}}>
-              {t === "deploy" ? "📦 DEPLOY GUIDE" : t.toUpperCase()}
+          {["overview","ratios","analysis"].map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{padding:"9px 22px",fontSize:10,letterSpacing:3,color:tab===t?"#D4AF37":"#6a5a40",background:"none",border:"none",borderBottom:tab===t?"2px solid #D4AF37":"2px solid transparent",outline:"none",fontFamily:"'DM Mono',monospace",transition:"all 0.2s",marginBottom:-1}}>
+              {t.toUpperCase()}
             </button>
           ))}
         </div>
@@ -540,7 +1034,7 @@ function App() {
         {loading ? (
           <div style={{textAlign:"center",padding:"60px 0"}}>
             <div style={{width:28,height:28,border:"2px solid #D4AF37",borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 14px"}}/>
-            <div style={{fontSize:11,color:"#4a4030",letterSpacing:4}}>FETCHING LIVE PRICES...</div>
+            <div style={{fontSize:11,color:"#8a7a58",letterSpacing:4}}>FETCHING LIVE PRICES...</div>
           </div>
         ) : (
           <>
@@ -560,7 +1054,8 @@ function App() {
                   </div>
                 )}
                 <PerfPanel prices={prices}/>
-                <div style={{fontSize:9,color:"#1e1a10",letterSpacing:2,textAlign:"center",marginTop:4}}>
+                <PriceChart currentPrices={prices}/>
+                <div style={{fontSize:9,color:"#4a3a28",letterSpacing:2,textAlign:"center",marginTop:12}}>
                   DATA: GOLD-API.COM · COINGECKO · {FINNHUB_KEY?"FINNHUB":"STOOQ"} · REFRESHES EVERY 90 SECONDS · NOT FINANCIAL ADVICE
                 </div>
               </div>
@@ -568,8 +1063,28 @@ function App() {
             {tab === "ratios" && (
               <div className="fade-up"><RatiosPanel prices={prices}/></div>
             )}
-            {tab === "deploy" && (
-              <div className="fade-up"><GitHubGuide/></div>
+            {tab === "analysis" && (
+              <div className="fade-up" style={{display:"grid",gap:14}}>
+                {[
+                  { title:"Why Compare These Assets?", color:"#D4AF37",
+                    text:"Gold, silver, Bitcoin, and the S&P 500 represent four fundamentally different stores of value. Gold is the oldest monetary metal, trusted for thousands of years. Silver is both monetary and industrial. Bitcoin is a digital scarcity asset with a fixed supply of 21 million coins. The S&P 500 reflects US equity market performance. Comparing them reveals relative strength, inflation sensitivity, and investor sentiment across asset classes." },
+                  { title:"Gold / Silver Ratio (GSR)", color:"#A8B8C8",
+                    text:"The GSR shows how many ounces of silver it takes to buy one ounce of gold. A high ratio (above 80) historically signals silver is cheap relative to gold — some traders use this as a rotation signal. A low ratio (below 50) suggests silver has outperformed gold. The 20th century average was around 47:1. The ratio peaked near 124 during the COVID-19 market shock in March 2020." },
+                  { title:"Bitcoin vs Precious Metals", color:"#F7931A",
+                    text:"Bitcoin is often called 'digital gold' due to its fixed supply of 21 million coins and resistance to inflation. When the BTC/Gold ratio rises, Bitcoin is outperforming gold on a price basis. When it falls, gold is holding value better. Unlike metals, Bitcoin has no industrial use — it is purely a monetary and speculative asset. Bitcoin also carries significantly more volatility than either metal." },
+                  { title:"S&P 500 vs Gold (Classic Macro Ratio)", color:"#5B9BD5",
+                    text:"The S&P 500/Gold ratio (using SPY ETF as a proxy) is a classic macro indicator watched by institutional investors. When equities rise faster than gold, risk appetite is high and markets are confident. When gold outperforms equities, investors are seeking safety from uncertainty. This ratio is a useful barometer of overall market stress or complacency." },
+                  { title:"Data Sources", color:"#c0a060",
+                    text:"Gold and silver spot prices are sourced from gold-api.com (free, no authentication required). Bitcoin prices come from the CoinGecko public API. S&P 500 data uses the SPY ETF as a proxy via Stooq (or Finnhub if a key is configured). All prices refresh automatically every 90 seconds. Prices may differ slightly from dealer or exchange prices due to spread and timing." },
+                  { title:"Disclaimer", color:"#6a5a40",
+                    text:"Nothing on this tracker constitutes financial advice. Past price relationships are not predictive of future performance. Precious metals carry price risk and generate no income. Bitcoin is a highly speculative asset. The S&P 500 can decline significantly during recessions. Always consult a qualified financial advisor before making any investment decisions." },
+                ].map((item,i) => (
+                  <div key={i} style={{background:"#0f0e0b",border:`1px solid ${item.color}30`,borderLeft:`3px solid ${item.color}`,borderRadius:8,padding:"20px 24px"}}>
+                    <div style={{fontSize:10,letterSpacing:3,color:item.color,marginBottom:10}}>{item.title.toUpperCase()}</div>
+                    <p style={{fontSize:13,color:"#b0a080",lineHeight:1.9}}>{item.text}</p>
+                  </div>
+                ))}
+              </div>
             )}
           </>
         )}
