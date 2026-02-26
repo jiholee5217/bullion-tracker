@@ -119,35 +119,13 @@ async function fetchMetal(sym) {
 }
 
 async function fetchBitcoin() {
-  // Try Coinbase public API first (no key, no rate limit, CORS ok)
-  try {
-    const [spotRes, statsRes] = await Promise.all([
-      fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot", { cache: "no-store" }),
-      fetch("https://api.coinbase.com/v2/prices/BTC-USD/historic?period=day", { cache: "no-store" }).catch(() => null),
-    ]);
-    if (spotRes.ok) {
-      const spotData = await spotRes.json();
-      const price = parseFloat(spotData.data.amount);
-      // Get 24h change from Binance public ticker (no key, CORS ok)
-      const binRes = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", { cache: "no-store" });
-      if (binRes.ok) {
-        const bin = await binRes.json();
-        const prev = parseFloat(bin.prevClosePrice);
-        const change = price - prev;
-        const changePct = (change / prev) * 100;
-        return { price, prev, change, changePct, source: "Coinbase + Binance" };
-      }
-      return { price, prev: price, change: 0, changePct: 0, source: "Coinbase" };
-    }
-  } catch(e) {}
-
-  // Fallback: Binance 24hr ticker alone
+  // Binance 24hr ticker — no key, CORS enabled, returns price + prevClose
   const r = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", { cache: "no-store" });
   if (!r.ok) throw new Error(`Binance BTC: HTTP ${r.status}`);
   const d = await r.json();
-  const price = parseFloat(d.lastPrice);
-  const prev  = parseFloat(d.prevClosePrice);
-  const change = price - prev;
+  const price     = parseFloat(d.lastPrice);
+  const prev      = parseFloat(d.prevClosePrice);
+  const change    = price - prev;
   const changePct = (change / prev) * 100;
   return { price, prev, change, changePct, source: "Binance" };
 }
@@ -592,18 +570,28 @@ async function fetchHistoricalSPY(days) {
 }
 
 async function fetchHistoricalMetal(sym, days) {
-  // Use CoinGecko for XAU/XAG — no key needed, CORS enabled
-  // CoinGecko uses "bitcoin" style IDs: gold = "gold", silver = "silver"
-  const cgId = sym === "XAU" ? "gold" : "silver";
-  const cappedDays = Math.min(days, 1825); // CoinGecko max ~2000 days on free tier
-  const url = days <= 1
-    ? `https://api.coingecko.com/api/v3/coins/${cgId}/market_chart?vs_currency=usd&days=1&interval=hourly`
-    : `https://api.coingecko.com/api/v3/coins/${cgId}/market_chart?vs_currency=usd&days=${cappedDays}`;
-  const r = await fetch(url, { cache:"no-store" });
-  if (!r.ok) throw new Error(`CoinGecko ${sym} historical failed: HTTP ${r.status}`);
-  const d = await r.json();
-  if (!d.prices || !d.prices.length) throw new Error(`No historical prices for ${sym}`);
-  return d.prices.map(([ts, price]) => ({ ts, price }));
+  // Stooq via allorigins proxy — tracks xauusd and xagusd forex pairs
+  const ticker = sym === "XAU" ? "xauusd" : "xagusd";
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - Math.ceil(days * 1.4)); // extra buffer for weekends
+  const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+  const stooqUrl = `https://stooq.com/q/d/l/?s=${ticker}&d1=${fmt(start)}&d2=${fmt(end)}&i=d`;
+  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(stooqUrl)}`;
+  const r = await fetch(proxy, { cache:"no-store" });
+  if (!r.ok) throw new Error(`Stooq ${sym} proxy failed: HTTP ${r.status}`);
+  const j = await r.json();
+  const lines = (j.contents || "").trim().split("\n").slice(1); // skip header
+  const data = lines.map(l => {
+    const cols = l.split(",");
+    if (cols.length < 5) return null;
+    const [year,month,day] = cols[0].split("-").map(Number);
+    const price = parseFloat(cols[4]); // Close price
+    if (isNaN(price) || price <= 0) return null;
+    return { ts: new Date(year, month-1, day).getTime(), price };
+  }).filter(Boolean);
+  if (data.length < 2) throw new Error(`Not enough ${sym} historical data from Stooq`);
+  return data;
 }
 
 // Align two time series by timestamp (daily resolution match)
