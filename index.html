@@ -72,35 +72,34 @@ async function fetchMetal(sym) {
     try {
       const metalName = sym === "XAU" ? "gold" : "silver";
       // Single-metal endpoint returns: spot, change, change_percentage, bid, ask, high, low
-      // Step 1: Get today's live price
+      // metals.dev free tier: only /v1/latest works. Use gold-api open_price for prev close.
       const liveRes = await fetch(
         `https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`,
         { cache: "no-store" }
       );
-      console.log(`metals.dev live status:`, liveRes.status);
-      if (!liveRes.ok) throw new Error(`metals.dev live: ${liveRes.status}`);
+      if (!liveRes.ok) throw new Error(`metals.dev: ${liveRes.status}`);
       const ld = await liveRes.json();
-      console.log(`metals.dev live:`, JSON.stringify(ld).substring(0, 300));
+      console.log(`metals.dev live:`, JSON.stringify(ld).substring(0, 400));
       const price = parseFloat(ld.metals?.[metalName]);
-      if (isNaN(price) || price <= 0) throw new Error(`No price in response`);
+      if (isNaN(price) || price <= 0) throw new Error(`No price`);
 
-      // Step 2: Get yesterday's close — skip weekend days
-      const yest = new Date();
-      yest.setDate(yest.getDate() - 1);
-      if (yest.getDay() === 0) yest.setDate(yest.getDate() - 1); // Sun→Sat
-      if (yest.getDay() === 6) yest.setDate(yest.getDate() - 1); // Sat→Fri
-      const dateStr = yest.toISOString().split("T")[0];
-      const histRes = await fetch(
-        `https://api.metals.dev/v1/historical?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz&date=${dateStr}`,
-        { cache: "no-store" }
-      );
-      console.log(`metals.dev hist ${dateStr} status:`, histRes.status);
+      // Get prev close from gold-api open_price field (free, no key)
+      const gaRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
       let prev = price;
-      if (histRes.ok) {
-        const hd = await histRes.json();
-        console.log(`metals.dev hist:`, JSON.stringify(hd).substring(0, 300));
-        const p = parseFloat(hd.metals?.[metalName]);
-        if (!isNaN(p) && p > 0) prev = p;
+      if (gaRes.ok) {
+        const ga = await gaRes.json();
+        console.log(`gold-api ${sym}:`, JSON.stringify(ga));
+        // Try every possible prev-close field gold-api might return
+        const candidates = [ga.prev_close, ga.prevClose, ga.open_price, ga.openPrice, ga.open, ga.previousClose];
+        for (const c of candidates) {
+          const p = parseFloat(c);
+          if (!isNaN(p) && p > 0 && p !== price) { prev = p; break; }
+        }
+        // If still no prev, back-calculate from ch field
+        if (prev === price) {
+          const ch = parseFloat(ga.ch);
+          if (!isNaN(ch) && ch !== 0) prev = price - ch;
+        }
       }
       const change = price - prev;
       const changePct = prev !== price ? (change / prev) * 100 : 0;
