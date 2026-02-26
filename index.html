@@ -62,52 +62,20 @@ function fmtChange(c, id) {
 
 // ─── API FETCHERS ────────────────────────────────────────────────────────────
 async function fetchMetal(sym) {
-  // Fetch spot price; also attempt OHLC for reliable prev-close
-  const [priceRes, ohlcRes] = await Promise.all([
-    fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" }),
-    fetch(`https://api.gold-api.com/price/${sym}/ohlc`, { cache: "no-store" }).catch(() => null),
-  ]);
-  if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
-  const d = await priceRes.json();
-  if (!d.price) throw new Error(`No price returned for ${sym}`);
-  const price = parseFloat(d.price);
-
-  // Try OHLC array for yesterday's close (most reliable prev-close source)
-  let prev = null;
-  if (ohlcRes && ohlcRes.ok) {
-    try {
-      const ohlc = await ohlcRes.json();
-      if (Array.isArray(ohlc) && ohlc.length >= 2) {
-        const yesterday = ohlc[ohlc.length - 2];
-        prev = parseFloat(yesterday.close ?? yesterday.c ?? yesterday.Close);
-      } else if (Array.isArray(ohlc) && ohlc.length === 1) {
-        const candle = ohlc[0];
-        prev = parseFloat(candle.open ?? candle.o ?? candle.Open);
-      }
-    } catch(e) {}
-  }
-
-  // Fallback 1: use ch field if nonzero (back-calculate prev)
-  if (!prev || isNaN(prev)) {
-    const ch = parseFloat(d.ch);
-    if (!isNaN(ch) && ch !== 0) prev = price - ch;
-  }
-  // Fallback 2: prev_close_price field
-  if (!prev || isNaN(prev)) {
-    const pc = parseFloat(d.prev_close_price || d.previousClose);
-    if (!isNaN(pc) && pc > 0) prev = pc;
-  }
-  // Fallback 3: open price as rough proxy
-  if (!prev || isNaN(prev)) {
-    const op = parseFloat(d.open_price || d.open);
-    if (!isNaN(op) && op > 0) prev = op;
-  }
-  // Give up gracefully — show 0 change rather than wrong number
-  if (!prev || isNaN(prev)) prev = price;
-
-  const change    = price - prev;
-  const changePct = prev !== price ? ((price - prev) / prev) * 100 : 0;
-  return { price, prev, change, changePct, source: "gold-api.com" };
+  // Use CoinGecko for reliable price + 24h change (no auth, CORS enabled)
+  // gold-api.com free tier does not return reliable ch/chp values
+  const cgId = sym === "XAU" ? "gold" : "silver";
+  const cgUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`;
+  const r = await fetch(cgUrl, { cache: "no-store" });
+  if (!r.ok) throw new Error(`CoinGecko ${sym}: HTTP ${r.status}`);
+  const d = await r.json();
+  const entry = d[cgId];
+  if (!entry || !entry.usd) throw new Error(`No price for ${cgId}`);
+  const price     = entry.usd;
+  const changePct = entry.usd_24h_change ?? 0;
+  const change    = price * (changePct / 100);
+  const prev      = price - change;
+  return { price, prev, change, changePct, source: "CoinGecko" };
 }
 
 async function fetchBitcoin() {
@@ -1021,7 +989,7 @@ function App() {
         {/* Source badges */}
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
-            {label:"Gold & Silver",src:"gold-api.com",color:"#D4AF37"},
+            {label:"Gold & Silver",src:"CoinGecko",color:"#D4AF37"},
             {label:"Bitcoin",src:"CoinGecko",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
