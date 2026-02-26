@@ -36,7 +36,9 @@ const { useState, useEffect, useCallback, useRef } = React;
 // Paste it below, or leave empty to use the no-key mode (slower fallback)
 const FINNHUB_KEY = "d6fra59r01qqnmbpo5v0d6fra59r01qqnmbpo5vg";
 // Free metals API key — sign up at https://metals.dev (free, no credit card, 100 req/month)
-const METALS_DEV_KEY = "3LH8RFJG2QMLIIZVZQ9M268ZVZQ9M"; // ← paste your metals.dev API key here
+const METALS_DEV_KEY = "3LH8RFJG2QMLIIZVZQ9M268ZVZQ9M";
+// goldapi.io — free, no credit card, returns ch+chp directly. Sign up: https://www.goldapi.io
+const GOLDAPI_IO_KEY = "goldapi-k3psmm2yuynz-io";
 
 const ASSETS = {
   gold:    { label:"Gold",    sym:"XAU", color:"#D4AF37", glow:"rgba(212,175,55,0.15)",  icon:"⚜",  fmt:"$,.2f", unit:"/troy oz" },
@@ -67,41 +69,44 @@ function fmtChange(c, id) {
 // Calculate 24h change by fetching last 2 days of CoinGecko market chart
 // This works for bitcoin, and we use gold-api.com for metals price + open as prev
 async function fetchMetal(sym) {
-  // metals.dev — use /v1/metal endpoint which returns change & change_percentage directly
+  // goldapi.io: free tier, returns price + ch (change) + chp (change%) directly
+  // Sign up free at https://www.goldapi.io — no credit card needed
+  if (GOLDAPI_IO_KEY) {
+    try {
+      const r = await fetch(`https://www.goldapi.io/api/${sym}/USD`, {
+        headers: { "x-access-token": GOLDAPI_IO_KEY },
+        cache: "no-store"
+      });
+      if (r.ok) {
+        const d = await r.json();
+        console.log(`goldapi.io ${sym}:`, JSON.stringify(d));
+        const price = parseFloat(d.price);
+        const change = parseFloat(d.ch ?? 0);
+        const changePct = parseFloat(d.chp ?? 0);
+        if (!isNaN(price) && price > 0) {
+          return { price, prev: price - change, change, changePct, source: "goldapi.io" };
+        }
+      }
+    } catch(e) { console.error("goldapi.io error:", e); }
+  }
+  // Fallback: metals.dev for price only (no change data on free tier)
   if (METALS_DEV_KEY) {
     try {
       const metalName = sym === "XAU" ? "gold" : "silver";
-      // Single-metal endpoint returns: spot, change, change_percentage, bid, ask, high, low
-      // metals.dev for live price, Kraken OHLC for today's open (= prev close)
-      const krakenPair = sym === "XAU" ? "XAUUSD" : "XAGUSD";
-      const [liveRes, krakenRes] = await Promise.all([
-        fetch(`https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`, { cache: "no-store" }),
-        fetch(`https://api.kraken.com/0/public/Ticker?pair=${krakenPair}`, { cache: "no-store" }),
-      ]);
-      if (!liveRes.ok) throw new Error(`metals.dev: ${liveRes.status}`);
-      const ld = await liveRes.json();
-      const price = parseFloat(ld.metals?.[metalName]);
-      if (isNaN(price) || price <= 0) throw new Error(`No price from metals.dev`);
-
-      // Kraken ticker: t.o = today's opening price = previous close equivalent
-      let prev = price;
-      if (krakenRes.ok) {
-        const kd = await krakenRes.json();
-        if (!kd.error?.length) {
-          const t = kd.result?.[krakenPair] || kd.result?.[Object.keys(kd.result||{})[0]];
-          const open = parseFloat(t?.o);
-          if (!isNaN(open) && open > 0) prev = open;
+      const r = await fetch(`https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`, { cache: "no-store" });
+      if (r.ok) {
+        const d = await r.json();
+        const price = parseFloat(d.metals?.[metalName]);
+        if (!isNaN(price) && price > 0) {
+          return { price, prev: price, change: 0, changePct: 0, source: "metals.dev" };
         }
       }
-      const change = price - prev;
-      const changePct = prev !== price ? (change / prev) * 100 : 0;
-      return { price, prev, change, changePct, source: "metals.dev" };
-    } catch(e) { console.error("metals.dev/kraken error:", e); }
+    } catch(e) {}
   }
-  // Fallback: gold-api.com (price only, no reliable change)
-  const priceRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
-  if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
-  const d = await priceRes.json();
+  // Final fallback: gold-api.com
+  const r = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`gold-api: ${r.status}`);
+  const d = await r.json();
   if (!d.price) throw new Error(`No price for ${sym}`);
   return { price: parseFloat(d.price), prev: parseFloat(d.price), change: 0, changePct: 0, source: "gold-api.com" };
 }
@@ -272,28 +277,29 @@ function PerfPanel({ prices }) {
     .map(([id,d]) => ({id, ...ASSETS[id], pct: d.changePct}))
     .sort((a,b) => b.pct - a.pct);
   if (!items.length) return null;
-  // Use a fixed scale: clamp at 3% so all assets are visually comparable
-  const SCALE = Math.max(...items.map(i => Math.abs(i.pct)), 0.5);
+  // Scale so the largest mover = 45% of half-bar, others scale relative to it
+  const SCALE = Math.max(...items.map(i => Math.abs(i.pct)), 0.01);
   return (
     <div style={{background:"#0d0c09",border:"1px solid #1e1c14",borderRadius:12,padding:"18px 22px",marginBottom:18}}>
       <div style={{fontSize:10,letterSpacing:4,color:"#5a4a30",marginBottom:14}}>24H PERFORMANCE — ALL ASSETS</div>
       {items.map(item => {
         const isUp = item.pct >= 0;
-        const w = Math.min((Math.abs(item.pct) / SCALE) * 46, 46);
+        // w = % of the HALF bar (0–45%), capped so it never overflows
+        const w = Math.min((Math.abs(item.pct) / SCALE) * 45, 45);
         return (
           <div key={item.id} style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
             <span style={{width:68,fontSize:10,color:item.color,letterSpacing:2,flexShrink:0}}>{item.label.toUpperCase()}</span>
-            <div style={{flex:1,height:6,background:"#181410",borderRadius:3,overflow:"visible",position:"relative"}}>
+            <div style={{flex:1,height:6,background:"#181410",borderRadius:3,overflow:"hidden",position:"relative"}}>
               <div style={{
                 position:"absolute", height:"100%",
-                width:`${w*2}%`,
-                left: isUp ? "50%" : `calc(50% - ${w*2}%)`,
+                width:`${w}%`,
+                left: isUp ? "50%" : `calc(50% - ${w}%)`,
                 background: isUp
                   ? `linear-gradient(90deg, ${item.color}55, ${item.color})`
-                  : "linear-gradient(90deg, #e74c3c, #e74c3c88)",
+                  : `linear-gradient(90deg, #e74c3c, #e74c3c88)`,
                 borderRadius:3, transition:"width 0.8s ease",
               }}/>
-              <div style={{position:"absolute",left:"50%",top:-4,width:1,height:14,background:"#2a2818"}}/>
+              <div style={{position:"absolute",left:"50%",top:0,width:1,height:"100%",background:"#3a3020"}}/>
             </div>
             <span style={{width:60,textAlign:"right",fontSize:12,fontWeight:500,color:isUp?"#2ecc71":"#e74c3c"}}>
               {isUp?"+":""}{item.pct.toFixed(2)}%
@@ -322,7 +328,7 @@ function RatiosPanel({ prices }) {
     b ? { label:"Bitcoin / Silver", val:Math.round(b/s).toLocaleString(), note:`1 BTC = ${Math.round(b/s).toLocaleString()} oz silver`, hint:"", color:"#F7931A" } : null,
     sp ? { label:"S&P 500 / Gold", val:(sp/g).toFixed(4), note:`SPY ETF ÷ gold (classic macro ratio)`, hint: sp/g < 0.18 ? "Gold outperforming" : "Equities outperforming", color:"#5B9BD5" } : null,
     sp ? { label:"S&P 500 / Silver", val:(sp/s).toFixed(2), note:`SPY ETF ÷ silver`, hint:"", color:"#5B9BD5" } : null,
-    (g && b && sp) ? { label:"Gold Mkt vs BTC", val:(g * 1e9 / (b * 21e6)).toFixed(2) + "×", note:"Gold market cap estimated vs BTC theoretical max", hint:"", color:"#c0a060" } : null,
+    (g && b) ? { label:"Gold Mkt vs BTC", val:((6.9e9 * g) / (21e6 * b)).toFixed(2) + "×", note:"Est. gold market cap ÷ max BTC market cap", hint:(6.9e9*g)/(21e6*b) > 1 ? "Gold market larger than max BTC" : "BTC max cap exceeds gold", color:"#c0a060" } : null,
   ].filter(Boolean);
 
   return (
@@ -999,7 +1005,7 @@ function App() {
         {/* Source badges */}
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
-            {label:"Gold & Silver",src: METALS_DEV_KEY ? "metals.dev" : "gold-api.com",color:"#D4AF37"},
+            {label:"Gold & Silver",src: GOLDAPI_IO_KEY ? "goldapi.io" : METALS_DEV_KEY ? "metals.dev" : "gold-api.com",color:"#D4AF37"},
             {label:"Bitcoin",src:"Kraken",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
