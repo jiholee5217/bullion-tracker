@@ -336,9 +336,10 @@ function RatiosPanel({ prices }) {
   // Range: 40 (historic low) to 120 (historic high). Position = how far along that range.
   const GSR_MIN = 40, GSR_MAX = 120;
   const pct = Math.min(100, Math.max(0, ((gsr - GSR_MIN) / (GSR_MAX - GSR_MIN)) * 100));
-  const rc = gsr < 70 ? "#2ecc71" : gsr > 90 ? "#e74c3c" : "#D4AF37";
+  // High GSR = silver undervalued (right/red side). Low GSR = gold undervalued (left/green side).
+  const rc = gsr > 90 ? "#2ecc71" : gsr < 70 ? "#e74c3c" : "#D4AF37";
   const ratios = [
-    { label:"Gold / Silver (GSR)", val:gsr.toFixed(2), note:`${Math.round(gsr)} oz silver = 1 oz gold`, hint: gsr<70?"Silver historically cheap":gsr>90?"Gold historically cheap":"Neutral zone", color:"#D4AF37" },
+    { label:"Gold / Silver (GSR)", val:gsr.toFixed(2), note:`${Math.round(gsr)} oz silver = 1 oz gold`, hint: gsr>90?"Silver historically cheap (high GSR)":gsr<70?"Gold historically cheap (low GSR)":"Neutral zone", color:"#D4AF37" },
     b ? { label:"Bitcoin / Gold", val:(b/g).toFixed(2), note:`1 BTC buys ${(b/g).toFixed(2)} oz of gold`, hint:"Higher = BTC outperforming", color:"#F7931A" } : null,
     b ? { label:"Bitcoin / Silver", val:Math.round(b/s).toLocaleString(), note:`1 BTC = ${Math.round(b/s).toLocaleString()} oz silver`, hint:"", color:"#F7931A" } : null,
     sp ? { label:"S&P 500 / Gold", val:(sp/g).toFixed(4), note:`SPY ETF ÷ gold (classic macro ratio)`, hint: sp/g < 0.18 ? "Gold outperforming" : "Equities outperforming", color:"#5B9BD5" } : null,
@@ -366,18 +367,18 @@ function RatiosPanel({ prices }) {
             GOLD/SILVER RATIO <span style={{fontSize:24,fontWeight:500,color:rc,marginLeft:8}}>{gsr.toFixed(2)}</span>
           </div>
           <span style={{padding:"3px 12px",background:`${rc}18`,border:`1px solid ${rc}40`,borderRadius:4,fontSize:9,letterSpacing:3,color:rc}}>
-            {gsr < 70 ? "SILVER UNDERVALUED" : gsr > 90 ? "GOLD UNDERVALUED" : "NEUTRAL ZONE"}
+            {gsr > 90 ? "SILVER UNDERVALUED" : gsr < 70 ? "GOLD UNDERVALUED" : "NEUTRAL ZONE"}
           </span>
         </div>
         <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:8}}>
-          <span style={{color:"#2ecc71"}}>← SILVER CHEAP · 40</span>
+          <span style={{color:"#e74c3c"}}>← GOLD CHEAP · 40</span>
           <span style={{color:"#D4AF37"}}>80 · NEUTRAL</span>
-          <span style={{color:"#e74c3c"}}>120 · GOLD CHEAP →</span>
+          <span style={{color:"#2ecc71"}}>120 · SILVER CHEAP →</span>
         </div>
         {/* Gauge with full gradient + position needle */}
         <div style={{position:"relative",height:20,marginBottom:6}}>
           {/* Full gradient always shown */}
-          <div style={{position:"absolute",top:6,left:0,right:0,height:8,background:"linear-gradient(90deg,#2ecc71 0%,#D4AF37 50%,#e74c3c 100%)",borderRadius:4}}/>
+          <div style={{position:"absolute",top:6,left:0,right:0,height:8,background:"linear-gradient(90deg,#e74c3c 0%,#D4AF37 50%,#2ecc71 100%)",borderRadius:4}}/>
           {/* Dark overlay right of current position to show "unvisited" zone */}
           <div style={{position:"absolute",top:6,left:`${pct}%`,right:0,height:8,background:"rgba(7,7,7,0.72)",borderRadius:"0 4px 4px 0",transition:"left 1s ease"}}/>
           {/* Glowing needle */}
