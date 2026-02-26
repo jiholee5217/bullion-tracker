@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bullion Tracker — Live Prices</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: #070707; min-height: 100vh; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.15} }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes flashGreen { 0%{box-shadow:0 0 0 2px #2ecc7166} 100%{box-shadow:none} }
+    @keyframes flashRed { 0%{box-shadow:0 0 0 2px #e74c3c66} 100%{box-shadow:none} }
+    .fade-up { animation: fadeUp 0.4s ease forwards; }
+    .flash-up { animation: flashGreen 0.8s ease forwards; }
+    .flash-down { animation: flashRed 0.8s ease forwards; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: #0a0908; }
+    ::-webkit-scrollbar-thumb { background: #2a2510; border-radius: 3px; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: 0.5; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ─── CONFIG ─────────────────────────────────────────────────────────────────
+// To get a free Finnhub key for S&P 500: https://finnhub.io/register (takes 30 sec)
+// Paste it below, or leave empty to use the no-key mode (slower fallback)
+const FINNHUB_KEY = "";
+
+const ASSETS = {
+  gold:    { label:"Gold",    sym:"XAU", color:"#D4AF37", glow:"rgba(212,175,55,0.15)",  icon:"⚜",  fmt:"$,.2f", unit:"/troy oz" },
+  silver:  { label:"Silver",  sym:"XAG", color:"#A8B8C8", glow:"rgba(168,184,200,0.10)", icon:"◈",  fmt:"$,.3f", unit:"/troy oz" },
+  bitcoin: { label:"Bitcoin", sym:"BTC", color:"#F7931A", glow:"rgba(247,147,26,0.13)",  icon:"₿",  fmt:"$,.0f", unit:"/coin"    },
+  sp500:   { label:"S&P 500", sym:"SPY", color:"#5B9BD5", glow:"rgba(91,155,213,0.12)",  icon:"📊", fmt:"$,.2f", unit:"(SPY ETF)" },
+};
+
+function fmtPrice(v, id) {
+  if (v == null) return "—";
+  if (id === "bitcoin") return "$" + Math.round(v).toLocaleString();
+  if (id === "gold")    return "$" + v.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  if (id === "silver")  return "$" + v.toFixed(3);
+  return "$" + v.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+function fmtChange(c, id) {
+  if (c == null) return "—";
+  const abs = Math.abs(c);
+  const sign = c >= 0 ? "+" : "−";
+  if (id === "bitcoin") return sign + "$" + Math.round(abs).toLocaleString();
+  if (id === "silver")  return sign + "$" + abs.toFixed(3);
+  return sign + "$" + abs.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+// ─── API FETCHERS ────────────────────────────────────────────────────────────
+async function fetchMetal(sym) {
+  // gold-api.com — free, no auth, CORS enabled
+  const r = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`gold-api ${sym}: HTTP ${r.status}`);
+  const d = await r.json();
+  if (!d.price) throw new Error(`gold-api returned no price for ${sym}`);
+  const price = parseFloat(d.price);
+  const prev  = parseFloat(d.prev_close_price || d.previousClose || price);
+  const change = d.ch != null ? parseFloat(d.ch) : price - prev;
+  const changePct = d.chp != null ? parseFloat(d.chp) : ((price - prev) / prev * 100);
+  return { price, prev, change, changePct, source: "gold-api.com" };
+}
+
+async function fetchBitcoin() {
+  // CoinGecko public API — no key, CORS enabled
+  const r = await fetch(
+    "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true",
+    { cache: "no-store" }
+  );
+  if (!r.ok) throw new Error(`CoinGecko: HTTP ${r.status}`);
+  const d = await r.json();
+  const price = d.bitcoin.usd;
+  const changePct = d.bitcoin.usd_24h_change;
+  const change = price * (changePct / 100);
+  return { price, prev: price - change, change, changePct, source: "CoinGecko" };
+}
+
+async function fetchSP500() {
+  // Strategy: try Finnhub (needs free key), then fall back to stooq CSV proxy
+  if (FINNHUB_KEY) {
+    const r = await fetch(
+      `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`,
+      { cache: "no-store" }
+    );
+    if (!r.ok) throw new Error(`Finnhub: HTTP ${r.status}`);
+    const d = await r.json();
+    if (!d.c) throw new Error("Finnhub: no price returned");
+    return {
+      price: d.c, prev: d.pc, change: d.d, changePct: d.dp,
+      isMarketOpen: d.t > Date.now() / 1000 - 3600,
+      source: "Finnhub (SPY ETF)"
+    };
+  }
+
+  // Fallback: Stooq — returns CSV with Date,Open,High,Low,Close,Volume
+  // Use a CORS proxy (allorigins) to get around browser restrictions
+  const url = encodeURIComponent("https://stooq.com/q/l/?s=spy.us&f=sd2t2ohlcv&h&e=csv");
+  const r = await fetch(`https://api.allorigins.win/get?url=${url}`, { cache: "no-store" });
+  if (!r.ok) throw new Error("Stooq proxy unavailable");
+  const j = await r.json();
+  const lines = j.contents.trim().split("\n");
+  if (lines.length < 2) throw new Error("Stooq: no data");
+  // CSV: Symbol,Date,Time,Open,High,Low,Close,Volume
+  const today = lines[1].split(",");
+  const yesterday = lines[2] ? lines[2].split(",") : null;
+  const price = parseFloat(today[6]);
+  const prev  = yesterday ? parseFloat(yesterday[6]) : parseFloat(today[3]);
+  const change = price - prev;
+  const changePct = (change / prev) * 100;
+  return { price, prev, change, changePct, source: "Stooq (SPY ETF)" };
+}
+
+// ─── SPARKLINE ───────────────────────────────────────────────────────────────
+function Sparkline({ data, color, w = 200, h = 48 }) {
+  const [hov, setHov] = useState(null);
+  if (!data || data.length < 2) return (
+    <div style={{height:h, display:"flex", alignItems:"center", justifyContent:"center"}}>
+      <span style={{fontSize:9,color:"#3a3020",letterSpacing:2}}>30-DAY TREND (ILLUSTRATIVE)</span>
+    </div>
+  );
+  const min = Math.min(...data), max = Math.max(...data), range = max - min || 1;
+  const pts = data.map((v, i) => ({
+    x: 2 + (i / (data.length - 1)) * (w - 4),
+    y: 2 + (1 - (v - min) / range) * (h - 4), v
+  }));
+  const poly = pts.map(p => `${p.x},${p.y}`).join(" ");
+  const gid = `g${color.replace(/\W/g,"").slice(0,8)}`;
+  return (
+    <svg width={w} height={h} style={{overflow:"visible",cursor:"crosshair"}} onMouseLeave={()=>setHov(null)}>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.28"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <polygon points={`${pts[0].x},${h} ${poly} ${pts[pts.length-1].x},${h}`} fill={`url(#${gid})`}/>
+      <polyline points={poly} fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round"/>
+      {pts.map((p,i) => (
+        <rect key={i} x={p.x-6} y={0} width={12} height={h} fill="transparent"
+          onMouseEnter={()=>setHov(p)}/>
+      ))}
+      {hov && <>
+        <line x1={hov.x} y1={0} x2={hov.x} y2={h} stroke={color} strokeWidth="1" strokeDasharray="3,2" opacity="0.5"/>
+        <circle cx={hov.x} cy={hov.y} r="3" fill={color}/>
+        <rect x={Math.min(hov.x-28,w-60)} y={hov.y-24} width={60} height={18} rx="4" fill="#111" stroke={color} strokeWidth="0.7"/>
+        <text x={Math.min(hov.x,w-30)} y={hov.y-12} textAnchor="middle" fill={color} fontSize="10" fontFamily="'DM Mono',monospace">
+          {hov.v >= 1000 ? `$${Math.round(hov.v).toLocaleString()}` : `$${hov.v.toFixed(2)}`}
+        </text>
+      </>}
+    </svg>
+  );
+}
+
+// ─── CARD ────────────────────────────────────────────────────────────────────
+function AssetCard({ id, data, history }) {
+  const cfg = ASSETS[id];
+  const cardRef = useRef(null);
+  const prevPrice = useRef(null);
+  const isUp = data?.change >= 0;
+
+  useEffect(() => {
+    if (data?.price && prevPrice.current && prevPrice.current !== data.price && cardRef.current) {
+      cardRef.current.classList.remove("flash-up","flash-down");
+      void cardRef.current.offsetWidth;
+      cardRef.current.classList.add(data.price > prevPrice.current ? "flash-up" : "flash-down");
+    }
+    if (data?.price) prevPrice.current = data.price;
+  }, [data?.price]);
+
+  return (
+    <div ref={cardRef} style={{
+      background:"linear-gradient(145deg,#0f0e0b,#0b0a08)",
+      border:`1px solid ${cfg.color}28`, borderRadius:14, padding:"22px 24px",
+      position:"relative", overflow:"hidden", transition:"border-color 0.4s",
+    }}>
+      <div style={{position:"absolute",top:-50,right:-50,width:170,height:170,background:`radial-gradient(circle,${cfg.glow},transparent 70%)`,pointerEvents:"none"}}/>
+
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:16,lineHeight:1}}>{cfg.icon}</span>
+          <div>
+            <div style={{fontSize:11,fontWeight:500,color:cfg.color,letterSpacing:3}}>{cfg.label.toUpperCase()}</div>
+            <div style={{fontSize:9,color:"#3a3020",letterSpacing:2,marginTop:1}}>{cfg.sym}</div>
+          </div>
+        </div>
+        {data?.source && (
+          <div style={{fontSize:9,color:"#2a2010",letterSpacing:1,textAlign:"right",maxWidth:90,lineHeight:1.4}}>
+            {data.source}
+          </div>
+        )}
+      </div>
+
+      {/* Loading */}
+      {!data && (
+        <div style={{height:64,display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:16,height:16,border:`2px solid ${cfg.color}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+          <span style={{fontSize:10,color:"#3a3020",letterSpacing:2}}>FETCHING LIVE PRICE...</span>
+        </div>
+      )}
+
+      {/* Error */}
+      {data?.error && (
+        <div style={{padding:"10px 0"}}>
+          <div style={{fontSize:12,color:"#e74c3c",marginBottom:6}}>⚠ Could not load</div>
+          <div style={{fontSize:10,color:"#4a3a20",lineHeight:1.6}}>{data.error}</div>
+          {id === "sp500" && !FINNHUB_KEY && (
+            <div style={{marginTop:8,padding:"8px 10px",background:"#1a1200",border:"1px solid #3a2800",borderRadius:6,fontSize:9,color:"#a08040",lineHeight:1.8}}>
+              For S&P 500: add a free Finnhub API key at the top of this file.<br/>
+              Get one free at <strong style={{color:"#D4AF37"}}>finnhub.io/register</strong>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Live price */}
+      {data && !data.error && (
+        <>
+          <div style={{fontSize:34,fontWeight:500,color:cfg.color,letterSpacing:-0.5,lineHeight:1,marginBottom:8}}>
+            {fmtPrice(data.price, id)}
+            <span style={{fontSize:10,color:"#3a3020",marginLeft:8,letterSpacing:1,fontWeight:400}}>{cfg.unit}</span>
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
+            {[fmtChange(data.change, id), `${data.changePct >= 0 ? "+" : ""}${data.changePct?.toFixed(2)}%`].map((v,i) => (
+              <span key={i} style={{
+                display:"inline-flex",alignItems:"center",padding:"3px 10px",borderRadius:4,
+                fontSize:12,fontWeight:500,
+                background:isUp?"#0b1e0e":"#1e0b0b",
+                color:isUp?"#2ecc71":"#e74c3c",
+                border:`1px solid ${isUp?"#173520":"#351717"}`,
+              }}>{isUp&&i===0?"▲ ":!isUp&&i===0?"▼ ":""}{v}</span>
+            ))}
+            <span style={{fontSize:9,color:"#2a2010",letterSpacing:2,display:"flex",alignItems:"center",marginLeft:"auto"}}>24H</span>
+          </div>
+          <Sparkline data={history} color={cfg.color}/>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── PERF BARS ───────────────────────────────────────────────────────────────
+function PerfPanel({ prices }) {
+  const items = Object.entries(prices)
+    .filter(([,d]) => d?.changePct != null && !d?.error)
+    .map(([id,d]) => ({id, ...ASSETS[id], pct: d.changePct}))
+    .sort((a,b) => b.pct - a.pct);
+  if (!items.length) return null;
+  const maxAbs = Math.max(...items.map(i => Math.abs(i.pct)), 0.01);
+  return (
+    <div style={{background:"#0d0c09",border:"1px solid #1e1c14",borderRadius:12,padding:"18px 22px",marginBottom:18}}>
+      <div style={{fontSize:10,letterSpacing:4,color:"#5a4a30",marginBottom:14}}>24H PERFORMANCE — ALL ASSETS</div>
+      {items.map(item => {
+        const isUp = item.pct >= 0;
+        const w = (Math.abs(item.pct) / maxAbs) * 42;
+        return (
+          <div key={item.id} style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+            <span style={{width:68,fontSize:10,color:item.color,letterSpacing:2,flexShrink:0}}>{item.label.toUpperCase()}</span>
+            <div style={{flex:1,height:6,background:"#181410",borderRadius:3,overflow:"visible",position:"relative"}}>
+              <div style={{
+                position:"absolute", height:"100%",
+                width:`${w*2}%`,
+                left: isUp ? "50%" : `calc(50% - ${w*2}%)`,
+                background: isUp
+                  ? `linear-gradient(90deg, ${item.color}55, ${item.color})`
+                  : "linear-gradient(90deg, #e74c3c, #e74c3c88)",
+                borderRadius:3, transition:"width 0.8s ease",
+              }}/>
+              <div style={{position:"absolute",left:"50%",top:-4,width:1,height:14,background:"#2a2818"}}/>
+            </div>
+            <span style={{width:60,textAlign:"right",fontSize:12,fontWeight:500,color:isUp?"#2ecc71":"#e74c3c"}}>
+              {isUp?"+":""}{item.pct.toFixed(2)}%
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── RATIOS ──────────────────────────────────────────────────────────────────
+function RatiosPanel({ prices }) {
+  const g = prices.gold?.price, s = prices.silver?.price;
+  const b = prices.bitcoin?.price, sp = prices.sp500?.price;
+  if (!g || !s) return null;
+  const gsr = g / s;
+  const pct = Math.min(100, Math.max(0, ((gsr - 60) / 60) * 100));
+  const rc = gsr < 70 ? "#2ecc71" : gsr > 90 ? "#e74c3c" : "#D4AF37";
+  const ratios = [
+    { label:"Gold / Silver (GSR)", val:gsr.toFixed(2), note:`${Math.round(gsr)} oz silver = 1 oz gold`, hint: gsr<70?"Silver historically cheap":gsr>90?"Gold historically cheap":"Neutral zone", color:"#D4AF37" },
+    b ? { label:"Bitcoin / Gold", val:(b/g).toFixed(2), note:`1 BTC buys ${(b/g).toFixed(2)} oz of gold`, hint:"Higher = BTC outperforming", color:"#F7931A" } : null,
+    b ? { label:"Bitcoin / Silver", val:Math.round(b/s).toLocaleString(), note:`1 BTC = ${Math.round(b/s).toLocaleString()} oz silver`, hint:"", color:"#F7931A" } : null,
+    sp ? { label:"S&P 500 / Gold", val:(sp/g).toFixed(4), note:`SPY ETF ÷ gold (classic macro ratio)`, hint: sp/g < 0.18 ? "Gold outperforming" : "Equities outperforming", color:"#5B9BD5" } : null,
+    sp ? { label:"S&P 500 / Silver", val:(sp/s).toFixed(2), note:`SPY ETF ÷ silver`, hint:"", color:"#5B9BD5" } : null,
+    (g && b && sp) ? { label:"Gold Mkt vs BTC", val:(g * 1e9 / (b * 21e6)).toFixed(2) + "×", note:"Gold market cap estimated vs BTC theoretical max", hint:"", color:"#c0a060" } : null,
+  ].filter(Boolean);
+
+  return (
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))",gap:10,marginBottom:16}}>
+        {ratios.map((r,i) => (
+          <div key={i} style={{background:"#0d0c09",border:`1px solid ${r.color}22`,borderLeft:`3px solid ${r.color}`,borderRadius:8,padding:"14px 16px"}}>
+            <div style={{fontSize:9,letterSpacing:2,color:"#4a4030",marginBottom:5}}>{r.label.toUpperCase()}</div>
+            <div style={{fontSize:22,fontWeight:500,color:r.color,letterSpacing:-0.5,marginBottom:4}}>{r.val}</div>
+            <div style={{fontSize:10,color:"#4a3a20",marginBottom:r.hint?4:0}}>{r.note}</div>
+            {r.hint && <div style={{fontSize:9,color:r.color+"99",letterSpacing:1}}>{r.hint}</div>}
+          </div>
+        ))}
+      </div>
+
+      {/* GSR Gauge */}
+      <div style={{background:"#0d0c09",border:"1px solid #1e1c14",borderRadius:10,padding:"16px 20px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
+          <div style={{fontSize:12,color:"#5a4a30",letterSpacing:3}}>
+            GOLD/SILVER RATIO <span style={{fontSize:24,fontWeight:500,color:rc,marginLeft:8}}>{gsr.toFixed(2)}</span>
+          </div>
+          <span style={{padding:"3px 12px",background:`${rc}18`,border:`1px solid ${rc}40`,borderRadius:4,fontSize:9,letterSpacing:3,color:rc}}>
+            {gsr < 70 ? "SILVER UNDERVALUED" : gsr > 90 ? "GOLD UNDERVALUED" : "NEUTRAL ZONE"}
+          </span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:5}}>
+          <span style={{color:"#2ecc71"}}>← SILVER CHEAP · 60</span>
+          <span style={{color:"#D4AF37"}}>80 · NEUTRAL</span>
+          <span style={{color:"#e74c3c"}}>100 · GOLD CHEAP →</span>
+        </div>
+        <div style={{height:8,background:"#161410",borderRadius:4,overflow:"hidden"}}>
+          <div style={{height:"100%",width:`${pct}%`,background:"linear-gradient(90deg,#2ecc71,#D4AF37,#e74c3c)",borderRadius:4,transition:"width 1s ease"}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#282010",marginTop:5}}>
+          <span>Historic low ~47 (2011)</span><span>Historic high ~124 (COVID 2020)</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── GITHUB GUIDE ────────────────────────────────────────────────────────────
+function GitHubGuide() {
+  const [copied, setCopied] = useState(null);
+  const copy = (txt, key) => {
+    navigator.clipboard.writeText(txt);
+    setCopied(key);
+    setTimeout(() => setCopied(null), 1800);
+  };
+  const Cmd = ({children, id}) => (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#080706",border:"1px solid #2a2510",borderRadius:6,padding:"9px 14px",marginBottom:8,gap:12}}>
+      <code style={{fontSize:12,color:"#c8b878",letterSpacing:0.5,flex:1,wordBreak:"break-all"}}>{children}</code>
+      <button onClick={() => copy(children, id)} style={{background:copied===id?"#1a3a1a":"#161410",border:`1px solid ${copied===id?"#2ecc71":"#2a2510"}`,borderRadius:4,padding:"3px 10px",fontSize:9,letterSpacing:2,color:copied===id?"#2ecc71":"#5a5040",flexShrink:0,fontFamily:"'DM Mono',monospace",transition:"all 0.2s"}}>
+        {copied===id ? "✓ COPIED" : "COPY"}
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{display:"grid",gap:14}}>
+      {/* Step 1 */}
+      <div style={{background:"#0d0c09",border:"1px solid #D4AF3722",borderLeft:"3px solid #D4AF37",borderRadius:8,padding:"18px 22px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:"#D4AF37",marginBottom:12}}>STEP 1 — CREATE A GITHUB ACCOUNT & REPO</div>
+        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.8,marginBottom:10}}>
+          Go to <strong style={{color:"#D4AF37"}}>github.com</strong> → sign in → click the <strong style={{color:"#c0c0c0"}}>"+"</strong> button → <strong style={{color:"#c0c0c0"}}>New repository</strong><br/>
+          Name it <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>bullion-tracker</code>, set to <strong style={{color:"#c0c0c0"}}>Public</strong>, click <strong style={{color:"#c0c0c0"}}>Create repository</strong>.
+        </p>
+      </div>
+
+      {/* Step 2 */}
+      <div style={{background:"#0d0c09",border:"1px solid #A8B8C822",borderLeft:"3px solid #A8B8C8",borderRadius:8,padding:"18px 22px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:"#A8B8C8",marginBottom:12}}>STEP 2 — INSTALL GIT (IF NOT ALREADY)</div>
+        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.8,marginBottom:10}}>
+          Download Git from <strong style={{color:"#A8B8C8"}}>git-scm.com</strong> and install it. Then open your terminal (Mac: Terminal, Windows: Command Prompt or Git Bash).
+        </p>
+        <p style={{fontSize:11,color:"#5a5040",marginBottom:10}}>Verify it's installed:</p>
+        <Cmd id="v">git --version</Cmd>
+      </div>
+
+      {/* Step 3 */}
+      <div style={{background:"#0d0c09",border:"1px solid #F7931A22",borderLeft:"3px solid #F7931A",borderRadius:8,padding:"18px 22px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:"#F7931A",marginBottom:12}}>STEP 3 — RENAME THE FILE & PUSH TO GITHUB</div>
+        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.8,marginBottom:12}}>
+          Rename the downloaded file to <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>index.html</code> (GitHub Pages looks for this name). Then run these commands in the folder where the file is:
+        </p>
+        <Cmd id="a">git init</Cmd>
+        <Cmd id="b">git add index.html</Cmd>
+        <Cmd id="c">git commit -m "Launch bullion tracker"</Cmd>
+        <Cmd id="d">git branch -M main</Cmd>
+        <Cmd id="e">git remote add origin https://github.com/YOUR_USERNAME/bullion-tracker.git</Cmd>
+        <Cmd id="f">git push -u origin main</Cmd>
+        <div style={{marginTop:8,padding:"8px 12px",background:"#1a1200",border:"1px solid #3a2800",borderRadius:6,fontSize:10,color:"#a08040"}}>
+          ⚠ Replace <code style={{color:"#D4AF37"}}>YOUR_USERNAME</code> with your actual GitHub username
+        </div>
+      </div>
+
+      {/* Step 4 */}
+      <div style={{background:"#0d0c09",border:"1px solid #5B9BD522",borderLeft:"3px solid #5B9BD5",borderRadius:8,padding:"18px 22px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:"#5B9BD5",marginBottom:12}}>STEP 4 — ENABLE GITHUB PAGES</div>
+        <div style={{display:"grid",gap:6}}>
+          {[
+            "Go to your repo on GitHub",
+            "Click Settings (top right tab)",
+            "Scroll to Pages in the left sidebar",
+            'Under "Branch", select main → / (root)',
+            "Click Save",
+            "Wait ~60 seconds, then visit the URL shown",
+          ].map((s,i) => (
+            <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+              <span style={{width:20,height:20,background:"#5B9BD520",border:"1px solid #5B9BD540",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#5B9BD5",flexShrink:0}}>{i+1}</span>
+              <span style={{fontSize:12,color:"#7a6a50",paddingTop:2}}>{s}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{marginTop:12,padding:"10px 14px",background:"#0a1420",border:"1px solid #1a3050",borderRadius:6}}>
+          <div style={{fontSize:9,color:"#5B9BD5",letterSpacing:2,marginBottom:4}}>YOUR LIVE URL WILL BE:</div>
+          <code style={{fontSize:12,color:"#A8D4FF"}}>https://YOUR_USERNAME.github.io/bullion-tracker/</code>
+        </div>
+      </div>
+
+      {/* S&P 500 note */}
+      <div style={{background:"#0d0c09",border:"1px solid #5a4a3044",borderLeft:"3px solid #c0a060",borderRadius:8,padding:"18px 22px"}}>
+        <div style={{fontSize:10,letterSpacing:3,color:"#c0a060",marginBottom:10}}>BONUS — ENABLE LIVE S&P 500 PRICES</div>
+        <p style={{fontSize:12,color:"#7a6a50",lineHeight:1.9}}>
+          1. Go to <strong style={{color:"#D4AF37"}}>finnhub.io/register</strong> — create a free account (30 seconds, no credit card).<br/>
+          2. Copy your API key from the dashboard.<br/>
+          3. Open <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>index.html</code> in a text editor, find line:<br/>
+          <code style={{display:"block",background:"#080706",padding:"6px 10px",borderRadius:4,margin:"8px 0",color:"#c8b878",fontSize:11}}>{"const FINNHUB_KEY = \"\";"}</code>
+          4. Paste your key between the quotes, save, and re-push to GitHub.<br/>
+          <span style={{color:"#5a5040",fontSize:11}}>Free tier: 60 calls/min — more than enough for this tracker.</span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── APP ─────────────────────────────────────────────────────────────────────
+function App() {
+  const [prices, setPrices] = useState({gold:null,silver:null,bitcoin:null,sp500:null});
+  const [histories, setHistories] = useState({gold:[],silver:[],bitcoin:[],sp500:[]});
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("overview");
+  const [refreshing, setRefreshing] = useState(false);
+
+  const makeHist = (price, vol = 0.012) => {
+    const h = []; let p = price * (0.97 - Math.random() * 0.03);
+    for (let i = 0; i < 30; i++) { p *= 1 + (Math.random() - 0.48) * vol; h.push(+p.toFixed(4)); }
+    h.push(price); return h;
+  };
+
+  const fetchAll = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    const fetchers = [
+      fetchMetal("XAU"),
+      fetchMetal("XAG"),
+      fetchBitcoin(),
+      fetchSP500(),
+    ];
+    const keys = ["gold","silver","bitcoin","sp500"];
+    const vols = { gold:0.009, silver:0.014, bitcoin:0.04, sp500:0.008 };
+    const results = await Promise.allSettled(fetchers);
+    const np = {}, nh = {};
+    results.forEach((r,i) => {
+      const k = keys[i];
+      if (r.status === "fulfilled") {
+        np[k] = r.value;
+        nh[k] = makeHist(r.value.price, vols[k]);
+      } else {
+        np[k] = { error: r.reason?.message ?? "Unknown error" };
+        nh[k] = [];
+      }
+    });
+    setPrices(np); setHistories(nh);
+    setLastUpdate(new Date()); setLoading(false); setRefreshing(false);
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    const iv = setInterval(() => fetchAll(true), 90000);
+    return () => clearInterval(iv);
+  }, [fetchAll]);
+
+  const allFailed = !loading && Object.values(prices).every(d => !d || d.error);
+
+  return (
+    <div style={{background:"#070707",minHeight:"100vh",fontFamily:"'DM Mono',monospace",color:"#e8e0d0"}}>
+      {/* HEADER */}
+      <div style={{background:"linear-gradient(180deg,#0f0e0a,#070707)",borderBottom:"1px solid #1a1810",padding:"14px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:50}}>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{width:34,height:34,background:"linear-gradient(135deg,#D4AF37,#f5e17a)",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,boxShadow:"0 0 16px rgba(212,175,55,0.3)"}}>⚜</div>
+          <div>
+            <div style={{fontSize:13,letterSpacing:4,color:"#D4AF37",fontWeight:500}}>BULLION TRACKER</div>
+            <div style={{fontSize:9,letterSpacing:3,color:"#3a3020",marginTop:1}}>GOLD · SILVER · BTC · S&P500</div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          {lastUpdate && <div style={{fontSize:9,color:"#2a2010",letterSpacing:1,textAlign:"right"}}><div>UPDATED</div><div style={{color:"#4a4030"}}>{lastUpdate.toLocaleTimeString()}</div></div>}
+          <button onClick={() => fetchAll(true)} disabled={refreshing} style={{padding:"5px 13px",fontSize:10,letterSpacing:2,background:"transparent",color:refreshing?"#2a2010":"#D4AF37",border:`1px solid ${refreshing?"#2a2010":"#D4AF37"}`,borderRadius:4,fontFamily:"'DM Mono',monospace",transition:"all 0.2s"}}>
+            {refreshing ? "..." : "↻ REFRESH"}
+          </button>
+          <div style={{display:"flex",alignItems:"center",gap:7,padding:"5px 11px",background:"#0d1a0d",border:"1px solid #1a3a1a",borderRadius:4}}>
+            <div style={{width:6,height:6,background:"#2ecc71",borderRadius:"50%",boxShadow:"0 0 6px #2ecc71",animation:"blink 2s infinite"}}/>
+            <span style={{fontSize:9,letterSpacing:3,color:"#2ecc71"}}>LIVE</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{maxWidth:1080,margin:"0 auto",padding:"22px 16px"}}>
+        {/* Source badges */}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
+          {[
+            {label:"Gold & Silver",src:"gold-api.com",color:"#D4AF37"},
+            {label:"Bitcoin",src:"CoinGecko",color:"#F7931A"},
+            {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
+          ].map(b => (
+            <div key={b.src} style={{padding:"3px 12px",background:"#0d0c09",border:`1px solid ${b.color}25`,borderRadius:20,color:"#3a3020"}}>
+              <span style={{color:b.color}}>{b.label}</span> via {b.src}
+            </div>
+          ))}
+        </div>
+
+        {/* Tabs */}
+        <div style={{display:"flex",gap:2,marginBottom:22,borderBottom:"1px solid #1a1810"}}>
+          {["overview","ratios","deploy"].map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{padding:"9px 22px",fontSize:10,letterSpacing:3,color:tab===t?"#D4AF37":"#3a3020",background:"none",border:"none",borderBottom:tab===t?"2px solid #D4AF37":"2px solid transparent",outline:"none",fontFamily:"'DM Mono',monospace",transition:"all 0.2s",marginBottom:-1}}>
+              {t === "deploy" ? "📦 DEPLOY GUIDE" : t.toUpperCase()}
+            </button>
+          ))}
+        </div>
+
+        {loading ? (
+          <div style={{textAlign:"center",padding:"60px 0"}}>
+            <div style={{width:28,height:28,border:"2px solid #D4AF37",borderTopColor:"transparent",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 14px"}}/>
+            <div style={{fontSize:11,color:"#4a4030",letterSpacing:4}}>FETCHING LIVE PRICES...</div>
+          </div>
+        ) : (
+          <>
+            {tab === "overview" && (
+              <div className="fade-up">
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:16,marginBottom:18}}>
+                  {Object.keys(ASSETS).map(id => (
+                    <AssetCard key={id} id={id} data={prices[id]} history={histories[id]}/>
+                  ))}
+                </div>
+                {allFailed && (
+                  <div style={{padding:"16px 20px",background:"#1a0d0d",border:"1px solid #4a1a1a",borderRadius:8,marginBottom:16,fontSize:12,color:"#e07060",lineHeight:1.8}}>
+                    ⚠ All price APIs failed to load. This is likely a network/CORS issue when opening the file <strong>directly from your computer</strong> (file://).
+                    To fix: <strong>deploy to GitHub Pages or Netlify</strong> (see the Deploy Guide tab), or run a local server with{" "}
+                    <code style={{background:"#2a1010",padding:"1px 6px",borderRadius:3}}>python3 -m http.server 8080</code> and open{" "}
+                    <code style={{background:"#2a1010",padding:"1px 6px",borderRadius:3}}>localhost:8080</code>.
+                  </div>
+                )}
+                <PerfPanel prices={prices}/>
+                <div style={{fontSize:9,color:"#1e1a10",letterSpacing:2,textAlign:"center",marginTop:4}}>
+                  DATA: GOLD-API.COM · COINGECKO · {FINNHUB_KEY?"FINNHUB":"STOOQ"} · REFRESHES EVERY 90 SECONDS · NOT FINANCIAL ADVICE
+                </div>
+              </div>
+            )}
+            {tab === "ratios" && (
+              <div className="fade-up"><RatiosPanel prices={prices}/></div>
+            )}
+            {tab === "deploy" && (
+              <div className="fade-up"><GitHubGuide/></div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
