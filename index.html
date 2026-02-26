@@ -62,20 +62,54 @@ function fmtChange(c, id) {
 
 // ─── API FETCHERS ────────────────────────────────────────────────────────────
 async function fetchMetal(sym) {
-  // Use CoinGecko for reliable price + 24h change (no auth, CORS enabled)
-  // gold-api.com free tier does not return reliable ch/chp values
-  const cgId = sym === "XAU" ? "gold" : "silver";
-  const cgUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`;
-  const r = await fetch(cgUrl, { cache: "no-store" });
-  if (!r.ok) throw new Error(`CoinGecko ${sym}: HTTP ${r.status}`);
-  const d = await r.json();
-  const entry = d[cgId];
-  if (!entry || !entry.usd) throw new Error(`No price for ${cgId}`);
-  const price     = entry.usd;
-  const changePct = entry.usd_24h_change ?? 0;
-  const change    = price * (changePct / 100);
-  const prev      = price - change;
-  return { price, prev, change, changePct, source: "CoinGecko" };
+  // Fetch spot price and OHLC in parallel
+  // OHLC endpoint: GET /price/{sym}/ohlc — returns array of candles [{t,o,h,l,c}]
+  const [priceRes, ohlcRes] = await Promise.all([
+    fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" }),
+    fetch(`https://api.gold-api.com/price/${sym}/ohlc`, { cache: "no-store" }).catch(() => null),
+  ]);
+  if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
+  const d = await priceRes.json();
+  if (!d.price) throw new Error(`No price for ${sym}`);
+  const price = parseFloat(d.price);
+
+  let prev = null;
+
+  // Primary: get yesterday close from OHLC candles
+  if (ohlcRes && ohlcRes.ok) {
+    try {
+      const ohlc = await ohlcRes.json();
+      const arr = Array.isArray(ohlc) ? ohlc : (ohlc.data || ohlc.candles || []);
+      if (arr.length >= 2) {
+        // Sort by time ascending, take second-to-last candle's close
+        arr.sort((a, b) => (a.t || a.time || a.date || 0) - (b.t || b.time || b.date || 0));
+        const yest = arr[arr.length - 2];
+        const pc = parseFloat(yest.c || yest.close || yest.Close);
+        if (!isNaN(pc) && pc > 0) prev = pc;
+      } else if (arr.length === 1) {
+        // Only today's candle — use its open as proxy for prev close
+        const candle = arr[0];
+        const op = parseFloat(candle.o || candle.open || candle.Open);
+        if (!isNaN(op) && op > 0) prev = op;
+      }
+    } catch(e) {}
+  }
+
+  // Fallback: back-calculate from ch field
+  if (!prev || isNaN(prev)) {
+    const ch = parseFloat(d.ch);
+    if (!isNaN(ch) && ch !== 0) prev = price - ch;
+  }
+  // Fallback: prev_close_price
+  if (!prev || isNaN(prev)) {
+    const pc = parseFloat(d.prev_close_price || d.previousClose || d.prevClosePrice);
+    if (!isNaN(pc) && pc > 0 && Math.abs(pc - price) / price < 0.1) prev = pc;
+  }
+  if (!prev || isNaN(prev)) prev = price;
+
+  const change    = price - prev;
+  const changePct = prev !== price ? ((price - prev) / prev) * 100 : 0;
+  return { price, prev, change, changePct, source: "gold-api.com" };
 }
 
 async function fetchBitcoin() {
@@ -989,7 +1023,7 @@ function App() {
         {/* Source badges */}
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
-            {label:"Gold & Silver",src:"CoinGecko",color:"#D4AF37"},
+            {label:"Gold & Silver",src:"gold-api.com",color:"#D4AF37"},
             {label:"Bitcoin",src:"CoinGecko",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
