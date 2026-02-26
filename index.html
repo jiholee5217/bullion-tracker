@@ -65,34 +65,30 @@ function fmtChange(c, id) {
 // Calculate 24h change by fetching last 2 days of CoinGecko market chart
 // This works for bitcoin, and we use gold-api.com for metals price + open as prev
 async function fetchMetal(sym) {
-  // Use Finnhub forex quote — same key as S&P500, returns price + prevClose
-  // Finnhub forex symbols: OANDA:XAU_USD and OANDA:XAG_USD
-  const finnSym = sym === "XAU" ? "OANDA:XAU_USD" : "OANDA:XAG_USD";
+  // Finnhub futures symbols: GC=F (gold) and SI=F (silver) — available on free tier
+  const futureSym = sym === "XAU" ? "GC=F" : "SI=F";
   if (FINNHUB_KEY) {
     try {
       const r = await fetch(
-        `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(finnSym)}&token=${FINNHUB_KEY}`,
+        `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(futureSym)}&token=${FINNHUB_KEY}`,
         { cache: "no-store" }
       );
       if (r.ok) {
         const d = await r.json();
         if (d.c && d.c > 0) {
-          const price     = d.c;
-          const prev      = d.pc;
-          const change    = d.d;
-          const changePct = d.dp;
-          return { price, prev, change, changePct, source: "Finnhub" };
+          // Silver futures are quoted per troy oz * 5000 on SI=F, need /5000 — actually SI=F is already per oz
+          // GC=F is gold per troy oz, SI=F is silver per troy oz (both CME continuous)
+          return { price: d.c, prev: d.pc, change: d.d ?? (d.c - d.pc), changePct: d.dp ?? ((d.c - d.pc) / d.pc * 100), source: "Finnhub" };
         }
       }
     } catch(e) {}
   }
-  // Fallback: gold-api.com for price only
+  // Fallback: gold-api.com (price only, no reliable change)
   const priceRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
   if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
   const d = await priceRes.json();
   if (!d.price) throw new Error(`No price for ${sym}`);
-  const price = parseFloat(d.price);
-  return { price, prev: price, change: 0, changePct: 0, source: "gold-api.com" };
+  return { price: parseFloat(d.price), prev: parseFloat(d.price), change: 0, changePct: 0, source: "gold-api.com" };
 }
 
 async function fetchBitcoin() {
