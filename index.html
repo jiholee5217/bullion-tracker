@@ -540,16 +540,29 @@ async function fetchHistoricalBTC(days) {
 }
 
 async function fetchHistoricalSPY(days) {
+  // Use Finnhub candles endpoint if key available, else Stooq proxy
+  if (FINNHUB_KEY) {
+    const resolution = days <= 7 ? "30" : days <= 30 ? "D" : "W";
+    const to   = Math.floor(Date.now() / 1000);
+    const from = to - days * 86400;
+    const url  = `https://finnhub.io/api/v1/stock/candle?symbol=SPY&resolution=${resolution}&from=${from}&to=${to}&token=${FINNHUB_KEY}`;
+    const r = await fetch(url, { cache:"no-store" });
+    if (!r.ok) throw new Error(`Finnhub candles: HTTP ${r.status}`);
+    const d = await r.json();
+    if (d.s !== "ok" || !d.t || !d.c) throw new Error("Finnhub candles: no data");
+    return d.t.map((ts, i) => ({ ts: ts * 1000, price: d.c[i] }));
+  }
+  // Fallback: Stooq proxy
   const end = new Date();
   const start = new Date();
   start.setDate(start.getDate() - days);
-  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  const csv_url = `https://stooq.com/q/d/l/?s=spy.us&d1=${fmt(start).replace(/-/g,'')}&d2=${fmt(end).replace(/-/g,'')}&i=d`;
+  const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+  const csv_url = `https://stooq.com/q/d/l/?s=spy.us&d1=${fmt(start)}&d2=${fmt(end)}&i=d`;
   const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(csv_url)}`;
   const r = await fetch(proxy, { cache:"no-store" });
-  if (!r.ok) throw new Error("SPY historical failed");
+  if (!r.ok) throw new Error("SPY historical: proxy failed");
   const j = await r.json();
-  const lines = j.contents.trim().split("\n").slice(1); // skip header
+  const lines = (j.contents || "").trim().split("\n").slice(1);
   return lines.map(l => {
     const cols = l.split(",");
     const [year,month,day] = cols[0].split("-").map(Number);
@@ -558,23 +571,18 @@ async function fetchHistoricalSPY(days) {
 }
 
 async function fetchHistoricalMetal(sym, days) {
-  // freegoldapi.com — free, no key, CORS enabled
-  const end = new Date();
-  const start = new Date();
-  start.setDate(start.getDate() - days);
-  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  // Use daily endpoint — returns array of {date, price}
-  const metal = sym === "XAU" ? "gold" : "silver";
-  const url = `https://api.freegoldapi.com/v1/history?metal=${metal}&currency=USD&start_date=${fmt(start)}&end_date=${fmt(end)}`;
+  // Use CoinGecko for XAU/XAG — no key needed, CORS enabled
+  // CoinGecko uses "bitcoin" style IDs: gold = "gold", silver = "silver"
+  const cgId = sym === "XAU" ? "gold" : "silver";
+  const cappedDays = Math.min(days, 1825); // CoinGecko max ~2000 days on free tier
+  const url = days <= 1
+    ? `https://api.coingecko.com/api/v3/coins/${cgId}/market_chart?vs_currency=usd&days=1&interval=hourly`
+    : `https://api.coingecko.com/api/v3/coins/${cgId}/market_chart?vs_currency=usd&days=${cappedDays}`;
   const r = await fetch(url, { cache:"no-store" });
-  if (!r.ok) throw new Error(`freegoldapi ${sym} failed: ${r.status}`);
+  if (!r.ok) throw new Error(`CoinGecko ${sym} historical failed: HTTP ${r.status}`);
   const d = await r.json();
-  // Response: [{date, price}] or {prices:[{date,price}]}
-  const arr = Array.isArray(d) ? d : (d.prices || d.data || []);
-  return arr.map(item => ({
-    ts: new Date(item.date).getTime(),
-    price: parseFloat(item.price || item.close || item.value)
-  })).filter(p => !isNaN(p.price)).sort((a,b) => a.ts - b.ts);
+  if (!d.prices || !d.prices.length) throw new Error(`No historical prices for ${sym}`);
+  return d.prices.map(([ts, price]) => ({ ts, price }));
 }
 
 // Align two time series by timestamp (daily resolution match)
@@ -930,7 +938,7 @@ function PriceChart({ currentPrices }) {
         )}
       </div>
       <div style={{fontSize:8,color:"#3a3028",letterSpacing:2,marginTop:8,textAlign:"right"}}>
-        SOURCES: FREEGOLDAPI.COM (METALS) · COINGECKO (BTC) · STOOQ (SPY) · HISTORICAL DATA FOR INFORMATIONAL USE ONLY
+        SOURCES: COINGECKO (METALS & BTC) · COINGECKO (BTC) · STOOQ (SPY) · HISTORICAL DATA FOR INFORMATIONAL USE ONLY
       </div>
     </div>
   );
