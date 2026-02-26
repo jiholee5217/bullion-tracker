@@ -65,15 +65,18 @@ function fmtChange(c, id) {
 // Calculate 24h change by fetching last 2 days of CoinGecko market chart
 // This works for bitcoin, and we use gold-api.com for metals price + open as prev
 async function fetchMetal(sym) {
-  // Fetch today's spot price AND yesterday's close in parallel
-  // Use Stooq for yesterday's close — it returns CSV with Date,Open,High,Low,Close
-  const metal = sym === "XAU" ? "xauusd" : "xagusd";
-  const stooqUrl = `https://stooq.com/q/l/?s=${metal}&f=sd2ohlc&e=csv`;
-  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(stooqUrl)}`;
+  // Get today's spot price from gold-api.com
+  // Get prev close from Stooq 5-day history via allorigins proxy
+  const ticker = sym === "XAU" ? "xauusd" : "xagusd";
+  const today = new Date();
+  const past  = new Date(); past.setDate(today.getDate() - 5);
+  const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+  const histUrl = `https://stooq.com/q/d/l/?s=${ticker}&d1=${fmt(past)}&d2=${fmt(today)}&i=d`;
+  const proxy   = `https://api.allorigins.win/get?url=${encodeURIComponent(histUrl)}`;
 
-  const [priceRes, stooqRes] = await Promise.all([
+  const [priceRes, histRes] = await Promise.all([
     fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" }),
-    fetch(proxyUrl, { cache: "no-store" }).catch(() => null),
+    fetch(proxy, { cache: "no-store" }).catch(() => null),
   ]);
 
   if (!priceRes.ok) throw new Error(`gold-api ${sym}: HTTP ${priceRes.status}`);
@@ -81,35 +84,29 @@ async function fetchMetal(sym) {
   if (!d.price) throw new Error(`No price for ${sym}`);
   const price = parseFloat(d.price);
 
-  // Try to get prev close from Stooq CSV
+  // Parse Stooq CSV — format: Date,Open,High,Low,Close,Volume
   let prev = null;
-  if (stooqRes && stooqRes.ok) {
+  if (histRes && histRes.ok) {
     try {
-      const j = await stooqRes.json();
-      const lines = (j.contents || "").trim().split("\n");
-      // CSV header: Symbol,Date,Open,High,Low,Close
-      // We want yesterday's close — lines[2] if available, else use today's open
-      if (lines.length >= 3) {
-        const cols = lines[2].split(",");
-        const p = parseFloat(cols[5]); // Close column
+      const j  = await histRes.json();
+      const rows = (j.contents || "").trim().split("\n").slice(1).filter(Boolean);
+      // Last row = most recent trading day (yesterday or today's open)
+      if (rows.length >= 2) {
+        const cols = rows[rows.length - 2].split(","); // second-to-last = yesterday
+        const p = parseFloat(cols[4]); // Close
         if (!isNaN(p) && p > 0) prev = p;
-      } else if (lines.length >= 2) {
-        const cols = lines[1].split(",");
-        const p = parseFloat(cols[2]); // Open column as proxy
+      } else if (rows.length === 1) {
+        const cols = rows[0].split(",");
+        const p = parseFloat(cols[1]); // Open
         if (!isNaN(p) && p > 0) prev = p;
       }
     } catch(e) {}
   }
 
-  // Fallback: use open_price field from gold-api response
+  // Fallback: use gold-api open price
   if (!prev || isNaN(prev)) {
     const op = parseFloat(d.open_price || d.open || d.openPrice);
     if (!isNaN(op) && op > 0 && op !== price) prev = op;
-  }
-  // Fallback: back-calculate from ch field
-  if (!prev || isNaN(prev)) {
-    const ch = parseFloat(d.ch);
-    if (!isNaN(ch) && ch !== 0) prev = price - ch;
   }
   if (!prev || isNaN(prev)) prev = price;
 
@@ -119,15 +116,17 @@ async function fetchMetal(sym) {
 }
 
 async function fetchBitcoin() {
-  // Binance 24hr ticker — no key, CORS enabled, returns price + prevClose
-  const r = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", { cache: "no-store" });
-  if (!r.ok) throw new Error(`Binance BTC: HTTP ${r.status}`);
+  // Kraken public REST API — CORS enabled, no key needed
+  const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", { cache: "no-store" });
+  if (!r.ok) throw new Error(`Kraken BTC: HTTP ${r.status}`);
   const d = await r.json();
-  const price     = parseFloat(d.lastPrice);
-  const prev      = parseFloat(d.prevClosePrice);
-  const change    = price - prev;
-  const changePct = (change / prev) * 100;
-  return { price, prev, change, changePct, source: "Binance" };
+  if (d.error && d.error.length) throw new Error(`Kraken: ${d.error[0]}`);
+  const t = d.result.XXBTZUSD;
+  const price     = parseFloat(t.c[0]);   // last trade price
+  const open      = parseFloat(t.o);      // today's opening price
+  const change    = price - open;
+  const changePct = (change / open) * 100;
+  return { price, prev: open, change, changePct, source: "Kraken" };
 }
 
 async function fetchSP500() {
@@ -527,15 +526,20 @@ const PERIODS = [
 ];
 
 async function fetchHistoricalBTC(days) {
-  // Binance klines endpoint — free, no key, CORS enabled
-  const interval = days <= 1 ? "1h" : days <= 7 ? "4h" : days <= 30 ? "1d" : days <= 182 ? "3d" : "1w";
-  const limit = days <= 1 ? 24 : days <= 7 ? 42 : days <= 30 ? 30 : days <= 182 ? 60 : 260;
-  const url = `https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`;
+  // Kraken OHLC endpoint — CORS enabled, no key needed
+  // interval in minutes: 60=1h, 240=4h, 1440=1d, 10080=1w
+  const interval = days <= 1 ? 60 : days <= 7 ? 240 : days <= 30 ? 1440 : days <= 365 ? 1440 : 10080;
+  const since = Math.floor(Date.now()/1000) - days * 86400;
+  const url = `https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=${interval}&since=${since}`;
   const r = await fetch(url, { cache:"no-store" });
-  if (!r.ok) throw new Error(`Binance klines: HTTP ${r.status}`);
+  if (!r.ok) throw new Error(`Kraken OHLC: HTTP ${r.status}`);
   const d = await r.json();
-  // Binance kline: [openTime, open, high, low, close, ...]
-  return d.map(k => ({ ts: k[0], price: parseFloat(k[4]) }));
+  if (d.error && d.error.length) throw new Error(`Kraken: ${d.error[0]}`);
+  // Each entry: [time, open, high, low, close, vwap, volume, count]
+  return (d.result.XXBTZUSD || d.result.XBTUSD || []).map(k => ({
+    ts: k[0] * 1000,
+    price: parseFloat(k[4])
+  }));
 }
 
 async function fetchHistoricalSPY(days) {
@@ -1031,7 +1035,7 @@ function App() {
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
             {label:"Gold & Silver",src:"gold-api.com",color:"#D4AF37"},
-            {label:"Bitcoin",src:"Binance",color:"#F7931A"},
+            {label:"Bitcoin",src:"Kraken",color:"#F7931A"},
             {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
           ].map(b => (
             <div key={b.src} style={{padding:"3px 12px",background:"#0d0c09",border:`1px solid ${b.color}25`,borderRadius:20,color:"#7a6a48"}}>
