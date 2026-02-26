@@ -72,39 +72,31 @@ async function fetchMetal(sym) {
     try {
       const metalName = sym === "XAU" ? "gold" : "silver";
       // Single-metal endpoint returns: spot, change, change_percentage, bid, ask, high, low
-      // metals.dev free tier: only /v1/latest works. Use gold-api open_price for prev close.
-      const liveRes = await fetch(
-        `https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`,
-        { cache: "no-store" }
-      );
+      // metals.dev for live price, Kraken OHLC for today's open (= prev close)
+      const krakenPair = sym === "XAU" ? "XAUUSD" : "XAGUSD";
+      const [liveRes, krakenRes] = await Promise.all([
+        fetch(`https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`, { cache: "no-store" }),
+        fetch(`https://api.kraken.com/0/public/Ticker?pair=${krakenPair}`, { cache: "no-store" }),
+      ]);
       if (!liveRes.ok) throw new Error(`metals.dev: ${liveRes.status}`);
       const ld = await liveRes.json();
-      console.log(`metals.dev live:`, JSON.stringify(ld).substring(0, 400));
       const price = parseFloat(ld.metals?.[metalName]);
-      if (isNaN(price) || price <= 0) throw new Error(`No price`);
+      if (isNaN(price) || price <= 0) throw new Error(`No price from metals.dev`);
 
-      // Get prev close from gold-api open_price field (free, no key)
-      const gaRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
+      // Kraken ticker: t.o = today's opening price = previous close equivalent
       let prev = price;
-      if (gaRes.ok) {
-        const ga = await gaRes.json();
-        console.log(`gold-api ${sym}:`, JSON.stringify(ga));
-        // Try every possible prev-close field gold-api might return
-        const candidates = [ga.prev_close, ga.prevClose, ga.open_price, ga.openPrice, ga.open, ga.previousClose];
-        for (const c of candidates) {
-          const p = parseFloat(c);
-          if (!isNaN(p) && p > 0 && p !== price) { prev = p; break; }
-        }
-        // If still no prev, back-calculate from ch field
-        if (prev === price) {
-          const ch = parseFloat(ga.ch);
-          if (!isNaN(ch) && ch !== 0) prev = price - ch;
+      if (krakenRes.ok) {
+        const kd = await krakenRes.json();
+        if (!kd.error?.length) {
+          const t = kd.result?.[krakenPair] || kd.result?.[Object.keys(kd.result||{})[0]];
+          const open = parseFloat(t?.o);
+          if (!isNaN(open) && open > 0) prev = open;
         }
       }
       const change = price - prev;
       const changePct = prev !== price ? (change / prev) * 100 : 0;
       return { price, prev, change, changePct, source: "metals.dev" };
-    } catch(e) { console.error("metals.dev error:", e); }
+    } catch(e) { console.error("metals.dev/kraken error:", e); }
   }
   // Fallback: gold-api.com (price only, no reliable change)
   const priceRes = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
@@ -140,18 +132,8 @@ async function fetchSP500() {
     if (!d.c) throw new Error("Finnhub: no price");
     return { price: d.c, prev: d.pc, change: d.d, changePct: d.dp, source: "Finnhub (SPY ETF)" };
   }
-  // Fallback: Stooq via CORS proxy
-  const url = encodeURIComponent("https://stooq.com/q/l/?s=spy.us&f=sd2t2ohlcv&h&e=csv");
-  const r = await fetch(`https://api.allorigins.win/get?url=${url}`, { cache: "no-store" });
-  if (!r.ok) throw new Error("Stooq proxy unavailable");
-  const j = await r.json();
-  const lines = (j.contents || "").trim().split("\n");
-  if (lines.length < 2) throw new Error("Stooq: no data");
-  const today = lines[1].split(",");
-  const prev_line = lines[2] ? lines[2].split(",") : null;
-  const price = parseFloat(today[6]);
-  const prev  = prev_line ? parseFloat(prev_line[6]) : parseFloat(today[3]);
-  return { price, prev, change: price-prev, changePct: ((price-prev)/prev*100), source: "Stooq (SPY)" };
+  // No fallback — Finnhub key is required for SPY
+  throw new Error("Finnhub key required for S&P 500 data");
 }
 
 // ─── SPARKLINE ───────────────────────────────────────────────────────────────
@@ -555,47 +537,30 @@ async function fetchHistoricalSPY(days) {
     if (d.s !== "ok" || !d.t || !d.c) throw new Error("Finnhub candles: no data");
     return d.t.map((ts, i) => ({ ts: ts * 1000, price: d.c[i] }));
   }
-  // Fallback: Stooq proxy
-  const end = new Date();
-  const start = new Date();
-  start.setDate(start.getDate() - days);
-  const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-  const csv_url = `https://stooq.com/q/d/l/?s=spy.us&d1=${fmt(start)}&d2=${fmt(end)}&i=d`;
-  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(csv_url)}`;
-  const r = await fetch(proxy, { cache:"no-store" });
-  if (!r.ok) throw new Error("SPY historical: proxy failed");
-  const j = await r.json();
-  const lines = (j.contents || "").trim().split("\n").slice(1);
-  return lines.map(l => {
-    const cols = l.split(",");
-    const [year,month,day] = cols[0].split("-").map(Number);
-    return { ts: new Date(year, month-1, day).getTime(), price: parseFloat(cols[4]) };
-  }).filter(p => !isNaN(p.price));
+  throw new Error("Finnhub key required for S&P 500 historical data");
 }
 
 async function fetchHistoricalMetal(sym, days) {
-  // Stooq via allorigins proxy — tracks xauusd and xagusd forex pairs
-  const ticker = sym === "XAU" ? "xauusd" : "xagusd";
-  const end = new Date();
-  const start = new Date();
-  start.setDate(start.getDate() - Math.ceil(days * 1.4)); // extra buffer for weekends
-  const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-  const stooqUrl = `https://stooq.com/q/d/l/?s=${ticker}&d1=${fmt(start)}&d2=${fmt(end)}&i=d`;
-  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(stooqUrl)}`;
-  const r = await fetch(proxy, { cache:"no-store" });
-  if (!r.ok) throw new Error(`Stooq ${sym} proxy failed: HTTP ${r.status}`);
-  const j = await r.json();
-  const lines = (j.contents || "").trim().split("\n").slice(1); // skip header
-  const data = lines.map(l => {
-    const cols = l.split(",");
-    if (cols.length < 5) return null;
-    const [year,month,day] = cols[0].split("-").map(Number);
-    const price = parseFloat(cols[4]); // Close price
-    if (isNaN(price) || price <= 0) return null;
-    return { ts: new Date(year, month-1, day).getTime(), price };
-  }).filter(Boolean);
-  if (data.length < 2) throw new Error(`Not enough ${sym} historical data from Stooq`);
-  return data;
+  // Use Kraken OHLC for gold/silver historical — same as BTC, CORS enabled
+  // Kraken XAU/USD = XAUUSD, XAG/USD = XAGUSD
+  const pair = sym === "XAU" ? "XAUUSD" : "XAGUSD";
+  const interval = days <= 1 ? 60 : days <= 7 ? 240 : days <= 30 ? 1440 : days <= 365 ? 1440 : 10080;
+  const since = Math.floor(Date.now() / 1000) - days * 86400;
+  try {
+    const r = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${interval}&since=${since}`, { cache:"no-store" });
+    if (r.ok) {
+      const d = await r.json();
+      if (!d.error?.length && d.result) {
+        const key = Object.keys(d.result).find(k => k !== "last");
+        const rows = d.result[key] || [];
+        if (rows.length >= 2) {
+          return rows.map(k => ({ ts: k[0] * 1000, price: parseFloat(k[4]) }));
+        }
+      }
+    }
+  } catch(e) {}
+  // Fallback: use metals.dev latest as single data point
+  throw new Error(`No historical data available for ${sym}`);
 }
 
 // Align two time series by timestamp (daily resolution match)
