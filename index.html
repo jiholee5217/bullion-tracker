@@ -31,15 +31,6 @@
 <script type="text/babel">
 const { useState, useEffect, useCallback, useRef } = React;
 
-// ─── CONFIG ─────────────────────────────────────────────────────────────────
-// To get a free Finnhub key for S&P 500: https://finnhub.io/register (takes 30 sec)
-// Paste it below, or leave empty to use the no-key mode (slower fallback)
-const FINNHUB_KEY = "";
-// Free metals API key — sign up at https://metals.dev (free, no credit card, 100 req/month)
-const METALS_DEV_KEY = "";
-// goldapi.io — free, no credit card, returns ch+chp directly. Sign up: https://www.goldapi.io
-const GOLDAPI_IO_KEY = "";
-
 const ASSETS = {
   gold:    { label:"Gold",    sym:"XAU", color:"#D4AF37", glow:"rgba(212,175,55,0.15)",  icon:"⚜",  fmt:"$,.2f", unit:"/troy oz" },
   silver:  { label:"Silver",  sym:"XAG", color:"#A8B8C8", glow:"rgba(168,184,200,0.10)", icon:"◈",  fmt:"$,.3f", unit:"/troy oz" },
@@ -66,44 +57,31 @@ function fmtChange(c, id) {
 
 // ─── API FETCHERS ────────────────────────────────────────────────────────────
 
-// Calculate 24h change by fetching last 2 days of CoinGecko market chart
-// This works for bitcoin, and we use gold-api.com for metals price + open as prev
+async function fetchFromBackend(path) {
+  const response = await fetch(`/api/${path}`, { cache: "no-store" });
+  let data = null;
+
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("Secure API backend is unavailable");
+  }
+
+  if (!response.ok) {
+    throw new Error(data.error || "Secure API request failed");
+  }
+
+  return data;
+}
+
 async function fetchMetal(sym) {
-  // goldapi.io: free tier, returns price + ch (change) + chp (change%) directly
-  // Sign up free at https://www.goldapi.io — no credit card needed
-  if (GOLDAPI_IO_KEY) {
-    try {
-      const r = await fetch(`https://www.goldapi.io/api/${sym}/USD`, {
-        headers: { "x-access-token": GOLDAPI_IO_KEY },
-        cache: "no-store"
-      });
-      if (r.ok) {
-        const d = await r.json();
-        console.log(`goldapi.io ${sym}:`, JSON.stringify(d));
-        const price = parseFloat(d.price);
-        const change = parseFloat(d.ch ?? 0);
-        const changePct = parseFloat(d.chp ?? 0);
-        if (!isNaN(price) && price > 0) {
-          return { price, prev: price - change, change, changePct, source: "goldapi.io" };
-        }
-      }
-    } catch(e) { console.error("goldapi.io error:", e); }
+  try {
+    const asset = sym === "XAU" ? "gold" : "silver";
+    return await fetchFromBackend(`market?asset=${asset}`);
+  } catch {
+    // Keep the static GitHub Pages version useful when the backend is not hosted.
   }
-  // Fallback: metals.dev for price only (no change data on free tier)
-  if (METALS_DEV_KEY) {
-    try {
-      const metalName = sym === "XAU" ? "gold" : "silver";
-      const r = await fetch(`https://api.metals.dev/v1/latest?api_key=${METALS_DEV_KEY}&currency=USD&unit=toz`, { cache: "no-store" });
-      if (r.ok) {
-        const d = await r.json();
-        const price = parseFloat(d.metals?.[metalName]);
-        if (!isNaN(price) && price > 0) {
-          return { price, prev: price, change: 0, changePct: 0, source: "metals.dev" };
-        }
-      }
-    } catch(e) {}
-  }
-  // Final fallback: gold-api.com
+
   const r = await fetch(`https://api.gold-api.com/price/${sym}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`gold-api: ${r.status}`);
   const d = await r.json();
@@ -126,19 +104,7 @@ async function fetchBitcoin() {
 }
 
 async function fetchSP500() {
-  // Finnhub quote endpoint — requires key but we have one
-  if (FINNHUB_KEY) {
-    const r = await fetch(
-      `https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_KEY}`,
-      { cache: "no-store" }
-    );
-    if (!r.ok) throw new Error(`Finnhub: HTTP ${r.status}`);
-    const d = await r.json();
-    if (!d.c) throw new Error("Finnhub: no price");
-    return { price: d.c, prev: d.pc, change: d.d, changePct: d.dp, source: "Finnhub (SPY ETF)" };
-  }
-  // No fallback — Finnhub key is required for SPY
-  throw new Error("Finnhub key required for S&P 500 data");
+  return fetchFromBackend("market?asset=sp500");
 }
 
 // ─── SPARKLINE ───────────────────────────────────────────────────────────────
@@ -235,10 +201,9 @@ function AssetCard({ id, data, history }) {
         <div style={{padding:"10px 0"}}>
           <div style={{fontSize:12,color:"#e74c3c",marginBottom:6}}>⚠ Could not load</div>
           <div style={{fontSize:10,color:"#9a8060",lineHeight:1.6}}>{data.error}</div>
-          {id === "sp500" && !FINNHUB_KEY && (
+          {id === "sp500" && (
             <div style={{marginTop:8,padding:"8px 10px",background:"#1a1200",border:"1px solid #3a2800",borderRadius:6,fontSize:9,color:"#a08040",lineHeight:1.8}}>
-              For S&P 500: add a free Finnhub API key at the top of this file.<br/>
-              Get one free at <strong style={{color:"#D4AF37"}}>finnhub.io/register</strong>
+              S&P 500 data requires the deployed secure backend with a Finnhub key.
             </div>
           )}
         </div>
@@ -436,7 +401,7 @@ function GitHubGuide() {
           Rename the downloaded file to <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>index.html</code> (GitHub Pages looks for this name). Then run these commands in the folder where the file is:
         </p>
         <Cmd id="a">git init</Cmd>
-        <Cmd id="b">git add index.html</Cmd>
+        <Cmd id="b">git add .</Cmd>
         <Cmd id="c">git commit -m "Launch bullion tracker"</Cmd>
         <Cmd id="d">git branch -M main</Cmd>
         <Cmd id="e">git remote add origin https://github.com/YOUR_USERNAME/bullion-tracker.git</Cmd>
@@ -448,15 +413,13 @@ function GitHubGuide() {
 
       {/* Step 4 */}
       <div style={{background:"#0d0c09",border:"1px solid #5B9BD522",borderLeft:"3px solid #5B9BD5",borderRadius:8,padding:"18px 22px"}}>
-        <div style={{fontSize:10,letterSpacing:3,color:"#5B9BD5",marginBottom:12}}>STEP 4 — ENABLE GITHUB PAGES</div>
+        <div style={{fontSize:10,letterSpacing:3,color:"#5B9BD5",marginBottom:12}}>STEP 4 — DEPLOY THE SECURE VERSION</div>
         <div style={{display:"grid",gap:6}}>
           {[
-            "Go to your repo on GitHub",
-            "Click Settings (top right tab)",
-            "Scroll to Pages in the left sidebar",
-            'Under "Branch", select main → / (root)',
-            "Click Save",
-            "Wait ~60 seconds, then visit the URL shown",
+            "Import this GitHub repository into Vercel",
+            "Add FINNHUB_KEY, METALS_DEV_KEY, and GOLDAPI_IO_KEY as environment variables",
+            "Deploy the project",
+            "Open the Vercel URL to use the secure API routes",
           ].map((s,i) => (
             <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
               <span style={{width:20,height:20,background:"#5B9BD520",border:"1px solid #5B9BD540",borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#5B9BD5",flexShrink:0}}>{i+1}</span>
@@ -465,21 +428,18 @@ function GitHubGuide() {
           ))}
         </div>
         <div style={{marginTop:12,padding:"10px 14px",background:"#0a1420",border:"1px solid #1a3050",borderRadius:6}}>
-          <div style={{fontSize:9,color:"#5B9BD5",letterSpacing:2,marginBottom:4}}>YOUR LIVE URL WILL BE:</div>
-          <code style={{fontSize:12,color:"#A8D4FF"}}>https://YOUR_USERNAME.github.io/bullion-tracker/</code>
+          <div style={{fontSize:9,color:"#5B9BD5",letterSpacing:2,marginBottom:4}}>SECURITY:</div>
+          <code style={{fontSize:12,color:"#A8D4FF"}}>API keys stay in deployment environment variables</code>
         </div>
       </div>
 
       {/* S&P 500 note */}
       <div style={{background:"#0d0c09",border:"1px solid #5a4a3044",borderLeft:"3px solid #c0a060",borderRadius:8,padding:"18px 22px"}}>
-        <div style={{fontSize:10,letterSpacing:3,color:"#c0a060",marginBottom:10}}>BONUS — ENABLE LIVE S&P 500 PRICES</div>
+        <div style={{fontSize:10,letterSpacing:3,color:"#c0a060",marginBottom:10}}>STATIC FALLBACK MODE</div>
         <p style={{fontSize:12,color:"#b0a080",lineHeight:1.9}}>
-          1. Go to <strong style={{color:"#D4AF37"}}>finnhub.io/register</strong> — create a free account (30 seconds, no credit card).<br/>
-          2. Copy your API key from the dashboard.<br/>
-          3. Open <code style={{color:"#c8b878",background:"#111",padding:"1px 6px",borderRadius:3}}>index.html</code> in a text editor, find line:<br/>
-          <code style={{display:"block",background:"#080706",padding:"6px 10px",borderRadius:4,margin:"8px 0",color:"#c8b878",fontSize:11}}>{"const FINNHUB_KEY = \"\";"}</code>
-          4. Paste your key between the quotes, save, and re-push to GitHub.<br/>
-          <span style={{color:"#5a5040",fontSize:11}}>Free tier: 60 calls/min — more than enough for this tracker.</span>
+          GitHub Pages can still show gold, silver, and Bitcoin through public no-key providers.<br/>
+          Live and historical S&P 500 data requires the deployed backend.<br/>
+          <span style={{color:"#5a5040",fontSize:11}}>Never paste an API key into index.html or another browser-delivered file.</span>
         </p>
       </div>
     </div>
@@ -531,19 +491,9 @@ async function fetchHistoricalBTC(days) {
 }
 
 async function fetchHistoricalSPY(days) {
-  // Use Finnhub candles endpoint if key available, else Stooq proxy
-  if (FINNHUB_KEY) {
-    const resolution = days <= 7 ? "30" : days <= 30 ? "D" : "W";
-    const to   = Math.floor(Date.now() / 1000);
-    const from = to - days * 86400;
-    const url  = `https://finnhub.io/api/v1/stock/candle?symbol=SPY&resolution=${resolution}&from=${from}&to=${to}&token=${FINNHUB_KEY}`;
-    const r = await fetch(url, { cache:"no-store" });
-    if (!r.ok) throw new Error(`Finnhub candles: HTTP ${r.status}`);
-    const d = await r.json();
-    if (d.s !== "ok" || !d.t || !d.c) throw new Error("Finnhub candles: no data");
-    return d.t.map((ts, i) => ({ ts: ts * 1000, price: d.c[i] }));
-  }
-  throw new Error("Finnhub key required for S&P 500 historical data");
+  const data = await fetchFromBackend(`history?asset=sp500&days=${days}`);
+  if (!Array.isArray(data)) throw new Error("Secure API returned invalid history");
+  return data;
 }
 
 async function fetchHistoricalMetal(sym, days) {
@@ -1005,9 +955,9 @@ function App() {
         {/* Source badges */}
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18,fontSize:9,letterSpacing:1}}>
           {[
-            {label:"Gold & Silver",src: GOLDAPI_IO_KEY ? "goldapi.io" : METALS_DEV_KEY ? "metals.dev" : "gold-api.com",color:"#D4AF37"},
+            {label:"Gold & Silver",src:"Secure API / public fallback",color:"#D4AF37"},
             {label:"Bitcoin",src:"Kraken",color:"#F7931A"},
-            {label:"S&P 500",src: FINNHUB_KEY ? "Finnhub (SPY)" : "Stooq/allorigins (SPY)",color:"#5B9BD5"},
+            {label:"S&P 500",src:"Secure API (SPY)",color:"#5B9BD5"},
           ].map(b => (
             <div key={b.src} style={{padding:"3px 12px",background:"#0d0c09",border:`1px solid ${b.color}25`,borderRadius:20,color:"#7a6a48"}}>
               <span style={{color:b.color}}>{b.label}</span> via {b.src}
@@ -1041,7 +991,7 @@ function App() {
                 {allFailed && (
                   <div style={{padding:"16px 20px",background:"#1a0d0d",border:"1px solid #4a1a1a",borderRadius:8,marginBottom:16,fontSize:12,color:"#e07060",lineHeight:1.8}}>
                     ⚠ All price APIs failed to load. This is likely a network/CORS issue when opening the file <strong>directly from your computer</strong> (file://).
-                    To fix: <strong>deploy to GitHub Pages or Netlify</strong> (see the Deploy Guide tab), or run a local server with{" "}
+                    To fix: <strong>deploy to Vercel or GitHub Pages</strong> (see the Deploy Guide tab), or run a local server with{" "}
                     <code style={{background:"#2a1010",padding:"1px 6px",borderRadius:3}}>python3 -m http.server 8080</code> and open{" "}
                     <code style={{background:"#2a1010",padding:"1px 6px",borderRadius:3}}>localhost:8080</code>.
                   </div>
@@ -1049,7 +999,7 @@ function App() {
                 <PerfPanel prices={prices}/>
                 <PriceChart currentPrices={prices}/>
                 <div style={{fontSize:9,color:"#4a3a28",letterSpacing:2,textAlign:"center",marginTop:12}}>
-                  DATA: GOLD-API.COM · COINGECKO · {FINNHUB_KEY?"FINNHUB":"STOOQ"} · REFRESHES EVERY 90 SECONDS · NOT FINANCIAL ADVICE
+                  DATA: SECURE API · GOLD-API.COM · KRAKEN · REFRESHES EVERY 90 SECONDS · NOT FINANCIAL ADVICE
                 </div>
               </div>
             )}
